@@ -1,4 +1,4 @@
-# Brandon-bot
+# AlphaMind
 
 High-frequency trading bot using XGBoost and raw tick data.
 
