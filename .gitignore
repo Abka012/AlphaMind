@@ -1,5 +1,5 @@
 # Data files (large)
-data/
+data/raw_ticks
 *.csv
 
 # Virtual environment
