@@ -1,0 +1,28 @@
+# Data files (large)
+data/
+*.csv
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Models (keep in gitignore, large binary files)
+saved_models/*.pkl
+saved_models/*.pth
+
+# Environment
+.env
