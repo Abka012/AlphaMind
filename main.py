@@ -1,42 +1,24 @@
+import glob
 import os
+import socket
 import sys
 import time
 import traceback
-import platform
-import glob
+from collections import deque
 
+import joblib
 import numpy as np
 import pandas as pd
-import joblib
 from dotenv import load_dotenv
-
-
-# Windows check - main.py only works on Windows with MetaTrader5
-if platform.system() != "Windows":
-    print("=" * 60)
-    print("ERROR: main.py only works on Windows!")
-    print("=" * 60)
-    print("This script requires MetaTrader5 which is only available on Windows.")
-    print("Download MetaTrader5 from: https://www.mql5.com/")
-    print("")
-    print("For backtesting and training, use:")
-    print("  - python train.py   (train models)")
-    print("  - python backtest.py (backtest models)")
-    sys.exit(1)
-
-# Check if MT5 is available
-try:
-    import MetaTrader5 as mt5
-except ImportError:
-    print("=" * 60)
-    print("ERROR: MetaTrader5 not installed!")
-    print("=" * 60)
-    print("Please download and install MetaTrader5 from: https://www.mql5.com/")
-    sys.exit(1)
+from ejtraderCT import Ctrader
 
 load_dotenv()
 
-# Symbol mapping: lowercase filename -> MT5 uppercase symbol
+CTRADER_HOST = os.getenv("CTRADER_HOST")
+CTRADER_ACCOUNT = os.getenv("CTRADER_ACCOUNT")
+CTRADER_PASSWORD = os.getenv("CTRADER_PASSWORD")
+CTRADER_BROKER = os.getenv("CTRADER_BROKER")
+
 SYMBOL_MAP = {
     "eurusd": "EURUSD",
     "gbpusd": "GBPUSD",
@@ -46,23 +28,36 @@ SYMBOL_MAP = {
     "usdchf": "USDCHF",
 }
 
-# Thresholds
-OPP_THRESHOLD = float(os.getenv("OPP_THRESHOLD", "0.70"))
-DIR_LONG_THRESHOLD = float(os.getenv("DIR_LONG_THRESHOLD", "0.55"))
-DIR_SHORT_THRESHOLD = float(os.getenv("DIR_SHORT_THRESHOLD", "0.45"))
-COMBINED_CONF_THRESHOLD = float(os.getenv("COMBINED_CONF_THRESHOLD", "0.40"))
+TICK_HISTORY = 200
+tick_buffers = {symbol: deque(maxlen=TICK_HISTORY) for symbol in SYMBOL_MAP}
 
-# Risk parameters - pip based
-RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "0.02"))
-SL_PIPS = float(os.getenv("SL_PIPS", "10"))
-TP_PIPS = float(os.getenv("TP_PIPS", "20"))
+OPP_THRESHOLD = 0.70
+DIR_LONG_THRESHOLD = 0.55
+DIR_SHORT_THRESHOLD = 0.45
+COMBINED_CONF_THRESHOLD = 0.40
+
+RISK_PER_TRADE = 0.02
+SL_PIPS = 10
+TP_PIPS = 20
+
+api = None
+
+
+def check_connection():
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5)
+        result = sock.connect_ex((CTRADER_HOST, int(os.getenv("CTRADER_PORT", "5212"))))
+        sock.close()
+        return result == 0
+    except:
+        return False
 
 
 def load_all_models():
-    """Load all available models from saved_models/."""
     models = {}
     model_files = glob.glob("saved_models/*_xgb_model.pkl")
-    
+
     for f in model_files:
         symbol = os.path.basename(f).replace("_xgb_model.pkl", "")
         try:
@@ -77,258 +72,382 @@ def load_all_models():
             print(f"Loaded model: {symbol.upper()}")
         except Exception as e:
             print(f"Failed to load model {symbol}: {e}")
-    
+
     return models
 
 
 def calculate_combined_confidence(opp_pred, dir_pred):
-    """
-    Calculate combined confidence for trading decision.
-    Long: opp × dir
-    Short: opp × (1 - dir)
-    """
-    if dir_pred > 0.5:  # Long signal
+    if dir_pred > 0.5:
         return opp_pred * dir_pred
-    else:  # Short signal
+    else:
         return opp_pred * (1 - dir_pred)
 
 
 def predict(df, model_data):
-    """Get predictions from a single model."""
     scaler = model_data["scaler"]
     features = model_data["features"]
     model_opp = model_data["model_opp"]
     model_dir = model_data["model_dir"]
-    
+
     try:
         X = df[features].values[-1:]
         X = scaler.transform(X)
-        
+
         opp = model_opp.predict_proba(X)[0, 1]
         direction = model_dir.predict_proba(X)[0, 1]
-        
+
         return opp, direction
     except Exception as e:
         print(f"Prediction error: {e}")
         return 0.0, 0.5
 
 
-def get_latest_price(symbol):
-    """Get latest price from MT5."""
-    tick = mt5.symbol_info_tick(SYMBOL_MAP.get(symbol, symbol.upper()))
-    if tick is None:
-        return None, None
-    return tick.bid, tick.ask
+def get_latest_prices():
+    try:
+        log("Trying api.quote()...")
+        quotes = api.quote()
+        log(f"Quote result: {quotes}")
+        if quotes:
+            log(f"Got {len(quotes)} quotes")
+            return quotes
+        
+        log("Trying api.positions()...")
+        positions = api.positions()
+        log(f"Positions result: {positions}")
+        prices = {}
+        for pos in positions:
+            symbol = pos.get("symbol", "")
+            if symbol:
+                prices[symbol.lower()] = {
+                    "bid": pos.get("bid", 0),
+                    "ask": pos.get("ask", 0),
+                }
+        log(f"Got {len(prices)} prices from positions")
+        return prices
+    except Exception as e:
+        log(f"Failed to get prices: {e}")
+        import traceback
+        traceback.print_exc()
+        return {}
+
+
+def update_tick_buffer(symbol, bid, ask):
+    ctrader_symbol = SYMBOL_MAP.get(symbol, symbol.upper())
+    mid = (bid + ask) / 2
+    tick_buffers[symbol].append(
+        {
+            "timestamp": pd.Timestamp.now(),
+            "close": mid,
+            "bidPrice": bid,
+            "askPrice": ask,
+            "tick_volume": 1,
+        }
+    )
+
+
+def compute_live_features(symbol):
+    buffer = tick_buffers[symbol]
+
+    if len(buffer) < 50:
+        return None
+
+    df = pd.DataFrame(buffer)
+    df["close"] = (df["bidPrice"] + df["askPrice"]) / 2
+    df["tick_volume"] = df.get("tick_volume", pd.Series([1] * len(df)))
+    df["tick_spread"] = df["askPrice"] - df["bidPrice"]
+    df["hour"] = df["timestamp"].dt.hour
+
+    features = {}
+    for window in [10, 50, 100, 200]:
+        features[f"tick_ma_{window}"] = (
+            df["close"].rolling(window=window, min_periods=1).mean().iloc[-1]
+        )
+
+    features["tick_std"] = df["close"].rolling(window=100, min_periods=1).std().iloc[-1]
+    features["tick_std_50"] = (
+        df["close"].rolling(window=50, min_periods=1).std().iloc[-1]
+    )
+
+    for shift in [10, 50, 100]:
+        if len(df) > shift:
+            features[f"tick_momentum_{shift}"] = df["close"].iloc[-1] - df["close"].iloc[-shift - 1]
+        else:
+            features[f"tick_momentum_{shift}"] = 0
+
+    features["tick_trend"] = features["tick_ma_10"] - features["tick_ma_100"]
+    features["tick_trend_50"] = features["tick_ma_10"] - features["tick_ma_50"]
+    features["tick_trend_normalized"] = features["tick_trend"] / (
+        features["tick_std"] + 1e-9
+    )
+
+    features["tick_high_100"] = (
+        df["close"].rolling(window=100, min_periods=1).max().iloc[-1]
+    )
+    features["tick_low_100"] = (
+        df["close"].rolling(window=100, min_periods=1).min().iloc[-1]
+    )
+    features["tick_position"] = (df["close"].iloc[-1] - features["tick_low_100"]) / (
+        features["tick_high_100"] - features["tick_low_100"] + 1e-9
+    )
+
+    features["tick_volume_ma"] = (
+        df["tick_volume"].rolling(window=50, min_periods=1).mean().iloc[-1]
+    )
+    features["tick_volume_ratio"] = df["tick_volume"].iloc[-1] / (
+        features["tick_volume_ma"] + 1e-9
+    )
+    features["tick_volume_spike"] = 1 if features["tick_volume_ratio"] > 2 else 0
+
+    spread_pct = features["tick_spread"] / (df["close"].iloc[-1] + 1e-9)
+    features["tick_spread_pct"] = spread_pct
+
+    delta = df["close"].diff()
+    gain = delta.clip(lower=0).rolling(window=14, min_periods=1).mean().iloc[-1]
+    loss = (-delta.clip(upper=0)).rolling(window=14, min_periods=1).mean().iloc[-1]
+    rs = gain / (loss + 1e-9)
+    features["tick_rsi_centered"] = (100 - (100 / (1 + rs))) - 50
+
+    features["tick_atr"] = delta.abs().ewm(span=100, adjust=False).mean().iloc[-1]
+    features["tick_vol_regime"] = (
+        1
+        if features["tick_std"]
+        > df["tick_std"].rolling(200, min_periods=1).mean().iloc[-1]
+        else 0
+    )
+    features["tick_trend_regime"] = 1 if features["tick_trend"] > 0 else 0
+
+    features["hour"] = df["hour"].iloc[-1]
+    features["london_session"] = 1 if 7 <= features["hour"] < 16 else 0
+    features["ny_session"] = 1 if 13 <= features["hour"] < 21 else 0
+    features["asian_session"] = 1 if 0 <= features["hour"] < 8 else 0
+    features["overlap_session"] = 1 if 13 <= features["hour"] < 16 else 0
+
+    return features
 
 
 def calculate_lot_size(balance, risk_pct, sl_pips):
-    """Calculate lot size based on risk parameters."""
     risk_amount = balance * risk_pct
-    pip_value = 10  # Approximate
+    pip_value = 10
     lot = risk_amount / (sl_pips * pip_value)
     return round(max(lot, 0.01), 2)
 
 
+def get_pip_value(symbol):
+    jpy_pairs = ["usdjpy", "eurjpy", "gbpjpy", "audjpy", "nzdjpy", "cadjpy", "chfjpy"]
+    return 0.01 if symbol.lower() in jpy_pairs else 0.0001
+
+
 def place_trade(direction, symbol, lot, sl_pips, tp_pips):
-    """Place a trade on MT5 with pip-based stops."""
-    mt5_symbol = SYMBOL_MAP.get(symbol, symbol.upper())
-    
-    tick = mt5.symbol_info_tick(mt5_symbol)
-    if tick is None:
-        print(f"Failed to get tick for {mt5_symbol}")
+    ctrader_symbol = SYMBOL_MAP.get(symbol, symbol.upper())
+
+    try:
+        prices = get_latest_prices()
+        price_data = prices.get(ctrader_symbol, {})
+        bid = price_data.get("bid", 0)
+        ask = price_data.get("ask", 0)
+
+        if not bid or not ask:
+            log(f"No price for {ctrader_symbol}")
+            return False
+
+        pip_val = get_pip_value(symbol)
+
+        if direction == "BUY":
+            sl = bid - (sl_pips * pip_val)
+            tp = bid + (tp_pips * pip_val)
+            api.buy(ctrader_symbol, lot, sl, tp)
+            log(
+                f"Trade BUY {ctrader_symbol} | Lot: {lot} | SL: {sl:.5f} | TP: {tp:.5f}"
+            )
+        else:
+            sl = ask + (sl_pips * pip_val)
+            tp = ask - (tp_pips * pip_val)
+            api.sell(ctrader_symbol, lot, sl, tp)
+            log(
+                f"Trade SELL {ctrader_symbol} | Lot: {lot} | SL: {sl:.5f} | TP: {tp:.5f}"
+            )
+
+        return True
+
+    except Exception as e:
+        log(f"Trade failed: {e}")
         return False
-    
-    point = mt5.symbol_info(mt5_symbol).point
-    min_stop = mt5.symbol_info(mt5_symbol).trade_stops_level * point
-    
-    # Get pip value: 0.01 for JPY pairs, 0.0001 for others
-    def get_pip_value(sym):
-        jpy_pairs = ["usdjpy", "eurjpy", "gbpjpy", "audjpy", "nzdjpy", "cadjpy", "chfjpy"]
-        return 0.01 if sym.lower() in jpy_pairs else 0.0001
-    
-    pip_val = get_pip_value(symbol)
-    sl_dist = max(min_stop, sl_pips * pip_val)
-    tp_dist = max(min_stop, tp_pips * pip_val)
-    
-    if direction == "BUY":
-        price = tick.ask
-        sl = price - sl_dist
-        tp = price + tp_dist
-        order_type = mt5.ORDER_TYPE_BUY
-    else:
-        price = tick.bid
-        sl = price + sl_dist
-        tp = price - tp_dist
-        order_type = mt5.ORDER_TYPE_SELL
-    
-    request = {
-        "action": mt5.TRADE_ACTION_DEAL,
-        "symbol": mt5_symbol,
-        "volume": lot,
-        "type": order_type,
-        "price": price,
-        "sl": sl,
-        "tp": tp,
-        "deviation": 20,
-        "magic": 123456,
-        "comment": "HFT Bot Trade",
-        "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_FOK,
-    }
-    
-    result = mt5.order_send(request)
-    if result is None:
-        print(f"Order failed: {mt5.last_error()}")
-        return False
-    
-    print(f"Trade {direction} {mt5_symbol} | Lot: {lot} | Result: {result.retcode}")
-    return True
 
 
 def has_open_position(symbol):
-    """Check if there's an open position for a symbol."""
-    mt5_symbol = SYMBOL_MAP.get(symbol, symbol.upper())
-    positions = mt5.positions_get(symbol=mt5_symbol)
-    return len(positions) > 0
+    ctrader_symbol = SYMBOL_MAP.get(symbol, symbol.upper())
+    try:
+        positions = api.positions()
+        for pos in positions:
+            if pos.get("symbol", "").upper() == ctrader_symbol.upper():
+                return True
+        return False
+    except:
+        return False
 
 
 def close_all_positions():
-    """Close all open positions."""
-    positions = mt5.positions_get()
-    if len(positions) == 0:
-        return
-    
-    for pos in positions:
-        tick = mt5.symbol_info_tick(pos.symbol)
-        direction = mt5.ORDER_TYPE_SELL if pos.type == 0 else mt5.ORDER_TYPE_BUY
-        
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": pos.symbol,
-            "volume": pos.volume,
-            "type": direction,
-            "price": tick.bid if pos.type == 0 else tick.ask,
-            "deviation": 20,
-            "magic": 123456,
-            "comment": "Close position",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_FOK,
-        }
-        mt5.order_send(request)
+    try:
+        api.close_all()
+        log("Closed all positions")
+    except Exception as e:
+        log(f"Failed to close positions: {e}")
 
 
 def log(msg):
-    """Simple logging function."""
     print(f"[{time.strftime('%H:%M:%S')}] {msg}")
 
 
 def main():
-    """Main trading loop."""
+    global api
+
+    if (
+        not CTRADER_HOST
+        or not CTRADER_ACCOUNT
+        or not CTRADER_PASSWORD
+        or not CTRADER_BROKER
+    ):
+        print("=" * 60)
+        print("ERROR: Missing cTrader FIX API credentials in .env")
+        print("=" * 60)
+        print("Required variables:")
+        print("  CTRADER_HOST=host.ip")
+        print("  CTRADER_ACCOUNT=your_login")
+        print("  CTRADER_PASSWORD=your_password")
+        print("  CTRADER_BROKER=broker_id")
+        print("  CTRADER_PORT=5212 (default)")
+        sys.exit(1)
+
     log("Initializing HFT Bot...")
-    
-    # Initialize MT5
-    if not mt5.initialize():
-        print(f"MT5 initialization failed: {mt5.last_error()}")
+    log(f"Host: {CTRADER_HOST}")
+    log(f"Account: {CTRADER_ACCOUNT}")
+    log(f"Broker: {CTRADER_BROKER}")
+
+    try:
+        api = Ctrader(CTRADER_HOST, CTRADER_ACCOUNT, CTRADER_PASSWORD)
+        time.sleep(3)
+    except Exception as e:
+        print(f"=" * 60)
+        print(f"ERROR: Failed to connect to cTrader: {e}")
+        print("=" * 60)
         sys.exit(1)
-    
-    # Login
-    login = int(os.getenv("LOGIN", "0"))
-    password = os.getenv("PASSWORD", "")
-    server = os.getenv("SERVER", "")
-    
-    if login > 0 and password and server:
-        if not mt5.login(login, password, server=server):
-            print(f"MT5 login failed: {mt5.last_error()}")
-            sys.exit(1)
-        log("Connected to MT5!")
-    
-    # Get account info
-    account = mt5.account_info()
-    if account is None:
-        print("Failed to get account info")
+
+    if not api.isconnected():
+        print("=" * 60)
+        print("ERROR: Not connected to cTrader FIX API")
+        print("=" * 60)
         sys.exit(1)
-    balance = account.balance
-    log(f"Account balance: ${balance:.2f}")
-    
-    # Load all models
+
+    log("Connected to cTrader!")
+
+    try:
+        positions = api.positions()
+        log(f"Open positions: {len(positions)}")
+        balance = 10000
+    except Exception as e:
+        log(f"Failed to get positions: {e}")
+        balance = 10000
+
+    log(f"Account balance: ${balance:.2f} (demo)")
+
     models = load_all_models()
-    
+
     if not models:
         print("No models loaded! Run train.py first.")
         sys.exit(1)
-    
+
     log(f"Loaded {len(models)} models: {', '.join(models.keys())}")
-    log(f"Thresholds - Opp: {OPP_THRESHOLD}, Dir: {DIR_LONG_THRESHOLD}/{DIR_SHORT_THRESHOLD}, Combined: {COMBINED_CONF_THRESHOLD}")
-    
-    # Track last prediction time to avoid spam
-    last_prediction_time = {}
-    
+    log(
+        f"Thresholds - Opp: {OPP_THRESHOLD}, Dir: {DIR_LONG_THRESHOLD}/{DIR_SHORT_THRESHOLD}, Combined: {COMBINED_CONF_THRESHOLD}"
+    )
+
     log("Bot started! Waiting for signals...")
-    
+
+    log("Fetching live prices...")
+    try:
+        prices = get_latest_prices()
+        for ctrader_symbol, price_data in prices.items():
+            bid = price_data.get("bid", 0)
+            ask = price_data.get("ask", 0)
+            if bid and ask:
+                update_tick_buffer(ctrader_symbol.lower(), bid, ask)
+        log(f"Updated tick buffers: {len(tick_buffers)} symbols")
+    except Exception as e:
+        log(f"Failed to fetch prices: {e}")
+
     try:
         while True:
             try:
-                # Get predictions from ALL models
+                prices = get_latest_prices()
+                for ctrader_symbol, price_data in prices.items():
+                    bid = price_data.get("bid", 0)
+                    ask = price_data.get("ask", 0)
+                    if bid and ask:
+                        update_tick_buffer(ctrader_symbol.lower(), bid, ask)
+
                 signals = []
-                
+
                 for symbol, model_data in models.items():
-                    # Skip if we already have a position for this symbol
                     if has_open_position(symbol):
                         continue
-                    
-                    # For now, simulate prediction (in real usage, would fetch live data)
-                    # This is a placeholder - in production you'd fetch real tick data
-                    # and apply features using indicators.py
-                    
-                    # For paper trading simulation, we'll use a placeholder
-                    # In reality, you'd need to stream live ticks and compute features
-                    opp_pred = 0.5  # Placeholder
-                    dir_pred = 0.5  # Placeholder
-                    
+
+                    features = compute_live_features(symbol)
+                    if features is None:
+                        continue
+
+                    scaler = model_data["scaler"]
+                    feature_names = model_data["features"]
+                    model_opp = model_data["model_opp"]
+                    model_dir = model_data["model_dir"]
+
+                    X = np.array([[features.get(f, 0) for f in feature_names]])
+                    X = scaler.transform(X)
+
+                    opp_pred = model_opp.predict_proba(X)[0, 1]
+                    dir_pred = model_dir.predict_proba(X)[0, 1]
+
                     combined_conf = calculate_combined_confidence(opp_pred, dir_pred)
-                    
-                    # Check if this is a tradeable signal
+
                     if opp_pred > OPP_THRESHOLD:
                         if dir_pred > DIR_LONG_THRESHOLD:
                             signal_type = "LONG"
-                            signals.append((symbol, combined_conf, signal_type, dir_pred))
+                            signals.append(
+                                (symbol, combined_conf, signal_type, dir_pred)
+                            )
                         elif dir_pred < DIR_SHORT_THRESHOLD:
                             signal_type = "SHORT"
-                            signals.append((symbol, combined_conf, signal_type, dir_pred))
-                
-                # Filter signals by combined confidence threshold
+                            signals.append(
+                                (symbol, combined_conf, signal_type, dir_pred)
+                            )
+
                 trade_signals = [s for s in signals if s[1] > COMBINED_CONF_THRESHOLD]
-                
-                # Sort by combined confidence (highest first)
                 trade_signals.sort(key=lambda x: x[1], reverse=True)
-                
-                # Trade ALL qualifying signals
+
                 if trade_signals:
                     log(f"Found {len(trade_signals)} trade signal(s):")
                     for symbol, conf, signal_type, direction in trade_signals:
                         lot = calculate_lot_size(balance, RISK_PER_TRADE, SL_PIPS)
-                        
+
                         if signal_type == "LONG":
                             place_trade("BUY", symbol, lot, SL_PIPS, TP_PIPS)
                         else:
                             place_trade("SELL", symbol, lot, SL_PIPS, TP_PIPS)
-                        
+
                         log(f"  {symbol.upper()}: {signal_type} | Conf: {conf:.3f}")
-                
+
                 time.sleep(15)
-                
+
             except Exception as e:
                 tb = traceback.extract_tb(sys.exc_info()[2])[-1]
                 log(f"Error: {e} | File: {tb.filename} | Line: {tb.lineno}")
                 time.sleep(15)
-    
+
     except KeyboardInterrupt:
         log("Bot stopped by user")
-    
+
     finally:
         log("Closing all positions...")
         close_all_positions()
-        mt5.shutdown()
         log("Shutdown complete")
 
 

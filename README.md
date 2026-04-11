@@ -1,34 +1,80 @@
 # AlphaMind
 
-High-frequency trading bot using XGBoost and raw tick data.
+High-frequency trading bot using XGBoost and raw tick data with cTrader FIX API.
 
 ## Overview
 
 This trading bot uses machine learning (XGBoost) to predict price direction on multiple forex pairs using raw tick data from Dukascopy. One model is trained per trading pair.
 
+Trading is executed via **cTrader FIX API** for low-latency execution.
+
 ## Requirements
 
 - Python 3.10+
-- For live/paper trading on Windows: MetaTrader5 (download from https://www.mql5.com/)
+- cTrader FIX API credentials (get from your broker)
+- Internet connection
 
-### Installation
+## Installation
 
 1. Install dependencies:
-   ```bash
-   pip install pandas numpy xgboost scikit-learn joblib tqdm dukascopy-python python-dotenv
-   ```
+```bash
+pip install -r requirements.txt
+```
 
-2. (Windows only) For paper trading: Download and install MetaTrader5 from https://www.mql5.com/
+2. Configure environment (see .env Setup below)
+
+## .env Setup
+
+### Getting cTrader FIX Credentials
+
+Contact your broker to get FIX API credentials. You'll need:
+
+| Variable | Description | Example |
+|----------|------------|----------|
+| `CTRADER_HOST` | FIX API server host | `demo-uk-eqx-01.p.c-trader.com` |
+| `CTRADER_PORT` | FIX port (SSL) | `5212` |
+| `CTRADER_ACCOUNT` | SenderCompID | `demo.icmarkets.9973397` |
+| `CTRADER_PASSWORD` | FIX password | (your password) |
+| `CTRADER_BROKER` | Broker ID | `demo.icmarkets` |
+
+### Create .env File
+
+Create a `.env` file in the project root:
+
+```bash
+# cTrader FIX API Credentials
+CTRADER_HOST=your_host
+CTRADER_PORT=5212
+CTRADER_ACCOUNT=your_sendercompid
+CTRADER_PASSWORD=your_password
+CTRADER_BROKER=your_broker_id
+```
+
+Example for ICMarkets demo:
+```
+CTRADER_HOST=demo-uk-eqx-01.p.c-trader.com
+CTRADER_PORT=5212
+CTRADER_ACCOUNT=demo.icmarkets.9973397
+CTRADER_PASSWORD=your_password
+CTRADER_BROKER=demo.icmarkets
+```
+
+### Key Points
+
+- **Account format**: Must include broker prefix (e.g., `demo.icmarkets.9973397`)
+- **Broker ID**: Get from broker (common: `demo.icmarkets`, `live.icmarkets`)
+- **Host**: Different for demo vs live - check with your broker
+- **Password**: Use your cTrader platform password (not Google login if linked)
 
 ## Data Download
 
-Download 3 months of tick data for all pairs:
+Download tick data for all pairs for training:
 ```bash
 python data/download_raw_ticks.py
 ```
 
 This will create:
-- `data/raw_ticks/eurusd.csv` - ~millions of tick rows
+- `data/raw_ticks/eurusd.csv` - millions of tick rows
 - `data/raw_ticks/gbpusd.csv`
 - `data/raw_ticks/usdjpy.csv`
 - `data/raw_ticks/audusd.csv`
@@ -44,7 +90,7 @@ This will create:
 
 ## Training
 
-Train models for all 6 pairs automatically:
+Train models for all 6 pairs:
 ```bash
 python train.py
 ```
@@ -70,31 +116,35 @@ This will backtest all models in `saved_models/` and print a summary table.
 - Opportunity threshold: 0.70
 - Direction thresholds: 0.55 (long) / 0.45 (short)
 
-## Live Trading (Windows Only)
+## Live Trading
 
-**Note:** `main.py` only works on Windows with MetaTrader5 installed.
-
-For paper trading:
+Run the trading bot:
 ```bash
 python main.py
 ```
 
 The bot will:
-1. Load all available models from `saved_models/`
-2. Get predictions from ALL models for incoming market data
-3. Calculate combined confidence: `opp × dir` (long) or `opp × (1-dir)` (short)
-4. Trade ALL pairs where combined confidence > 0.40
+1. Connect to cTrader FIX API
+2. Load all available models from `saved_models/`
+3. Fetch live prices from cTrader
+4. Compute features and get predictions from ALL models
+5. Calculate combined confidence: `opp × dir` (long) or `opp × (1-dir)` (short)
+6. Trade ALL pairs where combined confidence > 0.40
 
-## Configuration
+### Trading Parameters (in main.py)
+```python
+OPP_THRESHOLD = 0.70        # Minimum opportunity probability
+DIR_LONG_THRESHOLD = 0.55   # Direction threshold for LONG
+DIR_SHORT_THRESHOLD = 0.45 # Direction threshold for SHORT
+COMBINED_CONF_THRESHOLD = 0.40  # Minimum combined confidence
 
-### Training Parameters
-- Timeframe: Raw tick data
-- Prediction horizon: 1000 ticks (~3-15 minutes depending on volatility)
-- Stop Loss: 10 pips
-- Take Profit: 20 pips (2:1 RR)
-- XGBoost: n_estimators=200, max_depth=6, learning_rate=0.03
+RISK_PER_TRADE = 0.02      # 2% risk per trade
+SL_PIPS = 10              # Stop loss in pips
+TP_PIPS = 20              # Take profit in pips
+```
 
-### Model Features (25 features)
+## Model Features (25 features)
+
 - Price: tick_ma_10, tick_ma_50, tick_ma_100, tick_ma_200
 - Volatility: tick_std, tick_std_50
 - Momentum: tick_momentum_10, tick_momentum_50, tick_momentum_100
@@ -105,15 +155,15 @@ The bot will:
 - Regime: tick_vol_regime, tick_trend_regime
 - Time: hour, london_session, ny_session, asian_session, overlap_session
 
-### Data Source
-- **Dukascopy Bank SA** - Free tick data feed
-- 3 months historical data
-- Full tick precision (bid/ask prices)
+## Data Source
+
+- **Training**: Dukascopy Bank SA (free tick data)
+- **Trading**: Your broker via cTrader FIX API
 
 ## Data Structure
 
 ```
-Brandon-bot/
+AlphaMind/
 ├── data/
 │   ├── raw_ticks/
 │   │   ├── eurusd.csv      # Raw tick data
@@ -124,12 +174,12 @@ Brandon-bot/
 │   ├── eurusd_xgb_model.pkl
 │   ├── gbpusd_xgb_model.pkl
 │   └── ...
-├── train.py               # Training script (trains all pairs)
-├── backtest.py           # Backtesting script (tests all models)
-├── main.py               # Live trading (Windows + MT5 only)
+├── train.py               # Training script
+├── backtest.py           # Backtesting script
+├── main.py               # Live trading bot
 ├── indicators.py         # Feature engineering
-├── cleanup.sh            # Cleanup old data/models
 ├── requirements.txt
+├── .env                 # Your credentials (not in git)
 └── README.md
 ```
 
@@ -141,6 +191,42 @@ Brandon-bot/
 4. AUDUSD - Australian Dollar/US Dollar
 5. USDCAD - US Dollar/Canadian Dollar
 6. USDCHF - US Dollar/Swiss Franc
+
+## Troubleshooting
+
+### Connection Issues
+
+**"Failed to connect to cTrader: list index out of range"**
+- Check `CTRADER_ACCOUNT` format - must be `broker.account` (e.g., `demo.icmarkets.9973397`)
+- Verify credentials are correct
+
+**"Ctrader.__init__() got an unexpected keyword argument"**
+- Use positional args: `Ctrader(host, account, password)` not keyword args
+
+**"Not connected to cTrader FIX API"**
+- Verify `CTRADER_HOST` is correct (demo vs live are different)
+- Wait for market open (markets closed on weekends)
+
+### Price Issues
+
+**"api.quote() returns empty"**
+- Market may be closed (weekends)
+- Demo accounts may not have weekend pricing
+- Wait for market open (Monday ~5pm EST)
+
+**"No price for symbol"**
+- Check symbol is in your broker's offering
+- Verify market is open
+
+### General
+
+**"Failed to get account info"**
+- The method names vary by ejtraderCT version
+- Bot uses `positions()` as fallback (defaults to $10,000 balance)
+
+**Model errors**
+- Ensure models are trained: run `python train.py` first
+- Check `saved_models/` folder has `.pkl` files
 
 ## Disclaimer
 
