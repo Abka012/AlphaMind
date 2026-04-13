@@ -1,6 +1,6 @@
 # AlphaMind
 
-High-frequency trading bot using XGBoost and raw tick data with cTrader FIX API.
+Medium-frequency trading bot using XGBoost and raw tick data with cTrader FIX API.
 
 ## Overview
 
@@ -136,45 +136,129 @@ The bot will:
 ### Trading Parameters (in main.py)
 ```python
 # Thresholds for trade signals
-OPP_THRESHOLD = 0.70           # Minimum opportunity probability (0.50-0.70)
-DIR_LONG_THRESHOLD = 0.55      # Direction threshold for LONG (0.52-0.55)
-DIR_SHORT_THRESHOLD = 0.45    # Direction threshold for SHORT (0.45-0.48)
-COMBINED_CONF_THRESHOLD = 0.40 # Minimum combined confidence (0.25-0.40)
+OPP_THRESHOLD = 0.50           # Minimum opportunity probability (0.50-0.70)
+DIR_LONG_THRESHOLD = 0.52      # Direction threshold for LONG (0.52-0.55)
+DIR_SHORT_THRESHOLD = 0.48    # Direction threshold for SHORT (0.45-0.48)
+COMBINED_CONF_THRESHOLD = 0.25 # Minimum combined confidence (0.25-0.40)
 
 # Risk Management
-RISK_PER_TRADE = 0.02          # 2% risk per trade
+RISK_PER_TRADE = 0.02          # 2% risk per trade (used for dynamic lot sizing)
 SL_PIPS = 10                   # Stop loss in pips
 TP_PIPS = 20                   # Take profit in pips (2:1 reward:risk)
 
-# Account
-DEFAULT_BALANCE = 1000000      # Default account balance (adjust as needed)
+# Lot Sizing
+BASE_LOT_SIZE = 100.0          # Base lot size for all trades
+CASH_BUFFER_PERCENT = 0.20     # Reserve 20% of equity as cash buffer (never trade with)
+MIN_EQUITY_THRESHOLD = 10000   # Minimum equity required to trade
+
+# Risk Management
+MAX_DRAWDOWN_PERCENT = 0.05   # 5% loss from peak triggers pause for the day
+MAX_CONCURRENT_POSITIONS = 2  # Maximum open positions at once
+MAX_MARGIN_USAGE_PERCENT = 0.50  # Don't open new trades if margin usage > 50%
+
+# Correlation Filter
+CORRELATED_PAIRS = {
+    "EURUSD": ["GBPUSD", "USDCHF"],
+    "GBPUSD": ["EURUSD", "USDCHF"],
+    "USDCHF": ["EURUSD", "GBPUSD"],
+}
+# (AUDUSD, USDCAD, USDJPY have no strong correlations)
+
+# Time-Based Limits
+CLOSE_EOD = True               # Close all positions at end of day
+EOD_CLOSE_HOUR = 21           # Close after 9 PM UTC
+
+# Reliability
+API_TIMEOUT = 5                # Timeout in seconds for API calls
+MAX_RECONNECT_RETRIES = 5      # Max reconnection attempts
+
+# Margin Call Handling
+MARGIN_RECOVERY_WAIT = 60      # Seconds to wait between recovery checks
+MARGIN_MAX_WAIT = 600          # Max wait time (10 minutes) before exit
 ```
+
+### Bot Reliability Features
+
+The bot includes comprehensive margin call prevention and risk management:
+
+#### Risk Management
+| Feature | Description |
+|---------|-------------|
+| **Cash Buffer** | Reserves 20% of equity as unused cash |
+| **Dynamic Position Sizing** | Lot size scales with equity (min 20% of max) |
+| **Max Drawdown** | Pauses trading after 5% loss from peak equity |
+| **Min Equity Check** | Stops trading if equity drops below $10,000 |
+
+#### Position Management
+| Feature | Description |
+|---------|-------------|
+| **Max Positions** | Maximum 2 concurrent open positions |
+| **Margin Usage Check** | Skip new trades if margin usage > 50% |
+| **Correlation Filter** | Avoids same-direction trades on correlated pairs |
+
+#### Connection & Recovery
+| Feature | Description |
+|---------|-------------|
+| **API Timeout** | 5 second timeout on all cTrader API calls |
+| **Connection Check** | Validates connection before each trading cycle |
+| **Exponential Backoff** | Reconnect wait time: 2^attempt + random jitter |
+| **Max Retries** | 5 attempts before exiting gracefully |
+| **Margin Call Detection** | Monitors position state for margin calls |
+| **Auto-Resume** | Automatically resumes trading after margin recovery |
+
+#### Time-Based
+| Feature | Description |
+|---------|-------------|
+| **EOD Close** | Closes all positions at 9 PM UTC |
+
+**Margin Call Handling Flow:**
+1. Detect margin call state from position data
+2. Close all open positions immediately
+3. Wait for margin recovery (60 second intervals)
+4. Resume trading after recovery (clears tick buffers)
+5. Exit after 10 minutes if unrecovered
+
+Example reconnection sequence:
+- Attempt 1: wait ~2s
+- Attempt 2: wait ~4s
+- Attempt 3: wait ~8s
+- Attempt 4: wait ~16s
+- Attempt 5: wait ~32s
+
+If all retries fail, the bot logs the failure and exits cleanly rather than hanging.
 
 ### Bot Workflow
 
-1. **Initialization**: Connect to cTrader, subscribe to symbols, load models
+1. **Initialization**: Connect to cTrader, subscribe to symbols, load models, get initial equity
 2. **Warm-up**: Wait for 50 ticks per symbol to accumulate in buffers (~12+ minutes)
 3. **Trading Loop** (every 15 seconds):
-   - Fetch latest prices for all symbols
+   - Check connection health
+   - Check for margin call state
+     - If margin call: close positions, wait for recovery, auto-resume
+   - Check end-of-day (close all at 9 PM UTC)
+   - Check max drawdown (pause if 5% loss from peak)
+   - Check equity minimum ($10,000 threshold)
+   - Check margin usage (skip if > 50%)
+   - Fetch latest prices for all symbols (with timeout)
    - Update tick buffers with new price data
-   - Compute features for each symbol
-   - Get model predictions (opportunity + direction)
-   - Calculate combined confidence score
-   - Filter signals by thresholds
-   - Check for existing positions
-   - Execute trades with proper lot sizing
+   - For each symbol:
+     - Compute features
+     - Get model predictions
+     - Calculate combined confidence
+     - Check thresholds
+     - Check max positions (max 2)
+     - Check correlation filter
+   - Execute trades with dynamic lot sizing (scales with equity)
 
-### Lot Size Calculation
+### Lot Size
+
+The bot uses a fixed lot size for all trades (configured via `FIXED_LOT_SIZE`).
 
 ```python
-lot = (balance × risk%) / (SL_pips × pip_value)
-max_lot = 100.0  # Cap to prevent excessive position sizing
+FIXED_LOT_SIZE = 100.0  # Fixed lot for all trades
 ```
 
-Example for $1M account with 2% risk:
-- Risk amount: $20,000
-- SL: 10 pips × $10/pip = $100 per lot
-- Lot size: $20,000 / $100 = 200 lots → capped at 100
+This simplifies position sizing - no need to calculate based on account balance or risk percentage.
 
 ## Model Features (25 features)
 
@@ -252,6 +336,23 @@ AlphaMind/
 - Check symbol is in your broker's offering
 - Verify market is open
 
+### Connection & Timeout Issues
+
+**Bot freezes/hangs after running for hours**
+- Fixed with timeout protection (5s) and automatic reconnection
+- Bot now performs connection health check before each cycle
+- Uses exponential backoff with jitter for reconnection attempts
+- Logs reconnection status and exits gracefully if all retries fail
+
+**"API call timed out" messages**
+- Normal behavior when network is slow
+- Bot will retry automatically with the next cycle
+
+**Reconnection loop**
+- If bot keeps reconnecting, check your network connection
+- Verify cTrader server is accessible
+- Consider using a more stable internet connection
+
 ### Trading Issues
 
 **No trades being placed despite strong signals**
@@ -267,12 +368,29 @@ AlphaMind/
 **Price precision errors**
 - SL/TP prices now rounded to correct decimal places (5 for most pairs, 3 for JPY)
 
-### General
+### Margin Call Handling
 
-**"Failed to get account info"**
-- The method names vary by ejtraderCT version
-- Bot uses `positions()` as fallback (defaults to $10,000 balance)
-- Set `DEFAULT_BALANCE` in main.py to match your actual account
+**Bot detects margin call and auto-recovers**
+- Bot monitors position state for margin call indicators
+- On margin call: automatically closes all positions
+- Waits for margin recovery (60 second intervals)
+- Automatically resumes trading after recovery
+- Clears tick buffers on resume for fresh data
+- Exits gracefully after 10 minutes if margin not recovered
+
+**Margin Prevention Strategies**
+The bot includes multiple layers of protection:
+
+1. **Cash Buffer**: Never trades with 20% of equity (reserved as buffer)
+2. **Dynamic Lot Sizing**: Lot size scales down as equity decreases
+3. **Max Drawdown**: Pauses trading for the day after 5% loss from peak
+4. **Min Equity**: Stops if equity drops below $10,000
+5. **Max Positions**: Limits to 2 concurrent trades
+6. **Margin Usage**: Skips new trades if margin usage > 50%
+7. **Correlation Filter**: Avoids same-direction trades on correlated pairs (EURUSD/GBPUSD/USDCHF)
+8. **EOD Close**: Closes all positions at 9 PM UTC
+
+### General
 
 **Model errors**
 - Ensure models are trained: run `python train.py` first

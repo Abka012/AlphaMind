@@ -1,11 +1,14 @@
 import glob
 import os
+import random
+import signal
 import socket
 import sys
 import time
 import traceback
 import warnings
 from collections import deque
+from datetime import datetime
 
 import joblib
 import numpy as np
@@ -32,16 +35,109 @@ SYMBOL_MAP = {
 TICK_HISTORY = 200
 tick_buffers = {symbol: deque(maxlen=TICK_HISTORY) for symbol in SYMBOL_MAP}
 
-OPP_THRESHOLD = 0.70
-DIR_LONG_THRESHOLD = 0.55
-DIR_SHORT_THRESHOLD = 0.45
-COMBINED_CONF_THRESHOLD = 0.40
+
+class TimeoutException(Exception):
+    pass
+
+
+def timeout_handler(signum, frame):
+    raise TimeoutException("API call timed out")
+
+
+def safe_api_call(func, *args, timeout=5, **kwargs):
+    original_timeout = signal.alarm(0)
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(timeout)
+    try:
+        result = func(*args, **kwargs)
+        signal.alarm(0)
+        return result
+    except TimeoutException:
+        signal.alarm(0)
+        return None
+    except Exception as e:
+        signal.alarm(0)
+        return None
+
+
+def check_connection():
+    try:
+        return api.isconnected()
+    except:
+        return False
+
+
+def reconnect(max_retries=5):
+    global api
+    for attempt in range(max_retries):
+        wait_time = (2 ** attempt) + random.uniform(0, 1)
+        log(f"Reconnecting... attempt {attempt+1}/{max_retries}, wait {wait_time:.1f}s")
+        time.sleep(wait_time)
+        try:
+            api = Ctrader(CTRADER_HOST, CTRADER_ACCOUNT, CTRADER_PASSWORD)
+            time.sleep(2)
+            if api.isconnected():
+                log("Reconnected successfully")
+                for symbol in SYMBOL_MAP.values():
+                    safe_api_call(api.subscribe, symbol)
+                time.sleep(1)
+                return True
+        except:
+            continue
+    log("Max retries reached")
+    return False
+
+OPP_THRESHOLD = 0.50
+DIR_LONG_THRESHOLD = 0.52
+DIR_SHORT_THRESHOLD = 0.48
+COMBINED_CONF_THRESHOLD = 0.25
 
 RISK_PER_TRADE = 0.02
 SL_PIPS = 10
 TP_PIPS = 20
 
-DEFAULT_BALANCE = 1000000  # Set to your actual account balance
+FIXED_LOT_SIZE = 100.0  # Fixed lot size for all trades
+
+# Cash Buffer
+CASH_BUFFER_PERCENT = 0.20  # Reserve 20% as unused
+
+# Dynamic Position Sizing
+BASE_LOT_SIZE = 100.0
+MIN_EQUITY_THRESHOLD = 10000
+
+# Max Drawdown
+MAX_DRAWDOWN_PERCENT = 0.05  # 5% loss triggers pause
+
+# Max Concurrent Positions
+MAX_CONCURRENT_POSITIONS = 2
+
+# Margin Utilization
+MAX_MARGIN_USAGE_PERCENT = 0.50
+
+# Correlation Filter
+CORRELATED_PAIRS = {
+    "EURUSD": ["GBPUSD", "USDCHF"],
+    "GBPUSD": ["EURUSD", "USDCHF"],
+    "USDJPY": [],
+    "AUDUSD": [],
+    "USDCAD": [],
+    "USDCHF": ["EURUSD", "GBPUSD"],
+}
+
+# Time-Based Limits
+CLOSE_EOD = True
+EOD_CLOSE_HOUR = 21  # 9 PM UTC
+
+# State tracking
+initial_equity = None
+peak_equity = None
+drawdown_paused = False
+last_eod_check = None
+
+MARGIN_CALL_ACTIVE = False
+MARGIN_RECOVERY_WAIT = 60
+MARGIN_MAX_WAIT = 600
+MARGIN_CHECK_COUNT = 0
 
 api = None
 
@@ -55,6 +151,137 @@ def check_connection():
         return result == 0
     except:
         return False
+
+
+def detect_margin_call():
+    try:
+        positions = safe_api_call(api.positions, timeout=3)
+        
+        # Only consider it a margin call if we get actual position data with state field
+        if positions is not None and len(positions) > 0:
+            for pos in positions:
+                state = pos.get("state", "")
+                if state in ["margin_call", "liquidating", "stop_out"]:
+                    return True
+        
+        # If positions returns empty list (normal state), that's not a margin call
+        # Only return True if we get explicit margin call state
+        return False
+        
+    except:
+        return False  # Don't treat API errors as margin call
+
+
+def get_account_equity():
+    try:
+        account_info = safe_api_call(api.accountInfo)
+        if account_info and 'balance' in account_info:
+            return float(account_info['balance'])
+        return None
+    except:
+        return None
+
+
+def calculate_max_lot_size(equity):
+    if equity is None:
+        equity = 1000000
+    available_for_trading = equity * (1 - CASH_BUFFER_PERCENT)
+    risk_amount = available_for_trading * RISK_PER_TRADE
+    lot = risk_amount / (SL_PIPS * 10)
+    max_lot = min(lot, BASE_LOT_SIZE)
+    return max(max_lot, 0.01)
+
+
+def calculate_dynamic_lot_size(equity, initial):
+    if equity is None or initial is None or initial == 0:
+        return BASE_LOT_SIZE
+    ratio = equity / initial
+    min_ratio = 0.2  # Minimum 20% of max lot
+    adjusted_ratio = max(ratio, min_ratio)
+    return BASE_LOT_SIZE * adjusted_ratio
+
+
+def check_max_drawdown(equity, peak, paused):
+    if equity is None:
+        return True, peak, paused
+    
+    if peak is None:
+        peak = equity
+    
+    if equity > peak:
+        peak = equity
+        if paused:
+            paused = False
+        return True, peak, False
+    
+    drawdown = (peak - equity) / peak
+    if drawdown >= MAX_DRAWDOWN_PERCENT and not paused:
+        return False, peak, True
+    
+    return True, peak, paused
+
+
+def get_margin_usage():
+    try:
+        positions = safe_api_call(api.positions, timeout=3)
+        if not positions:
+            return 0.0
+        
+        total_margin = 0
+        for pos in positions:
+            margin = pos.get("margin", 0)
+            if margin:
+                total_margin += float(margin)
+        
+        account_info = safe_api_call(api.accountInfo)
+        if account_info and 'balance' in account_info:
+            equity = float(account_info['balance'])
+            if equity > 0:
+                return total_margin / equity
+        
+        return 0.0
+    except:
+        return 0.0
+
+
+def get_open_positions_count():
+    try:
+        positions = safe_api_call(api.positions, timeout=3)
+        return len(positions) if positions else 0
+    except:
+        return 0
+
+
+def has_correlated_position(symbol, direction):
+    try:
+        positions = safe_api_call(api.positions, timeout=3)
+        if not positions:
+            return False
+        
+        correlated = CORRELATED_PAIRS.get(symbol, [])
+        direction_map = {"LONG": "buy", "SHORT": "sell"}
+        trade_direction = direction_map.get(direction, "")
+        
+        for pos in positions:
+            pos_symbol = pos.get("symbol", "").upper()
+            if pos_symbol in correlated:
+                pos_type = pos.get("type", "").lower()
+                if pos_type == trade_direction:
+                    return True
+        
+        return False
+    except:
+        return False
+
+
+def should_close_eod():
+    if not CLOSE_EOD:
+        return False
+    
+    current_hour = datetime.utcnow().hour
+    if current_hour >= EOD_CLOSE_HOUR:
+        return True
+    return False
 
 
 def load_all_models():
@@ -109,27 +336,28 @@ def get_latest_prices():
     prices = {}
     for symbol in SYMBOL_MAP.values():
         try:
-            q = api.quote(symbol)
+            q = safe_api_call(api.quote, symbol)
             if q:
                 if "bid" in q and "ask" in q:
                     prices[symbol] = q
                 elif "last" in q:
                     prices[symbol] = {"bid": q["last"], "ask": q["last"]}
-        except Exception as e:
+        except:
             pass
 
     if prices:
         return prices
 
     try:
-        positions = api.positions()
-        for pos in positions:
-            symbol = pos.get("symbol", "")
-            if symbol:
-                prices[symbol.lower()] = {
-                    "bid": pos.get("bid", 0),
-                    "ask": pos.get("ask", 0),
-                }
+        positions = safe_api_call(api.positions)
+        if positions:
+            for pos in positions:
+                symbol = pos.get("symbol", "")
+                if symbol:
+                    prices[symbol.lower()] = {
+                        "bid": pos.get("bid", 0),
+                        "ask": pos.get("ask", 0),
+                    }
         return prices
     except:
         return {}
@@ -250,11 +478,12 @@ def place_trade(direction, symbol, lot, sl_pips, tp_pips):
     ctrader_symbol = SYMBOL_MAP.get(symbol, symbol.upper())
 
     try:
-        positions = api.positions()
-        for pos in positions:
-            if pos.get("symbol", "").upper() == ctrader_symbol.upper():
-                log(f"Position already exists for {ctrader_symbol}, skipping")
-                return False
+        positions = safe_api_call(api.positions)
+        if positions:
+            for pos in positions:
+                if pos.get("symbol", "").upper() == ctrader_symbol.upper():
+                    log(f"Position already exists for {ctrader_symbol}, skipping")
+                    return False
     except:
         pass
 
@@ -296,7 +525,9 @@ def place_trade(direction, symbol, lot, sl_pips, tp_pips):
 def has_open_position(symbol):
     ctrader_symbol = SYMBOL_MAP.get(symbol, symbol.upper())
     try:
-        positions = api.positions()
+        positions = safe_api_call(api.positions)
+        if not positions:
+            return False
         for pos in positions:
             if pos.get("symbol", "").upper() == ctrader_symbol.upper():
                 return True
@@ -346,6 +577,8 @@ def main():
     log(f"Account: {CTRADER_ACCOUNT}")
     log(f"Broker: {CTRADER_BROKER}")
 
+    global MARGIN_CALL_ACTIVE, MARGIN_CHECK_COUNT, peak_equity, drawdown_paused, initial_equity
+
     try:
         api = Ctrader(CTRADER_HOST, CTRADER_ACCOUNT, CTRADER_PASSWORD)
         time.sleep(3)
@@ -366,20 +599,27 @@ def main():
     try:
         log("Subscribing to symbols...")
         for symbol in SYMBOL_MAP.values():
-            api.subscribe(symbol)
+            safe_api_call(api.subscribe, symbol)
         time.sleep(2)
     except Exception as e:
         log(f"Subscribe warning: {e}")
 
     try:
-        positions = api.positions()
-        log(f"Open positions: {len(positions)}")
-        balance = DEFAULT_BALANCE
+        positions = safe_api_call(api.positions)
+        log(f"Open positions: {len(positions) if positions else 0}")
+        
+        global initial_equity, peak_equity
+        equity = get_account_equity()
+        if equity:
+            initial_equity = equity
+            peak_equity = equity
+            log(f"Initial equity: ${equity:,.2f}")
+        else:
+            initial_equity = 1000000
+            peak_equity = 1000000
+            log("Could not get equity, using default: $1,000,000")
     except Exception as e:
         log(f"Failed to get positions: {e}")
-        balance = DEFAULT_BALANCE
-
-    log(f"Account balance: ${balance:,.2f} (demo)")
 
     models = load_all_models()
 
@@ -393,7 +633,6 @@ def main():
     )
 
     log("Bot started! Waiting for signals...")
-
     log("Fetching live prices...")
     try:
         prices = get_latest_prices()
@@ -409,7 +648,84 @@ def main():
     try:
         while True:
             try:
+                if not check_connection():
+                    log("Connection lost, attempting reconnect...")
+                    if not reconnect():
+                        log("Reconnection failed, exiting...")
+                        break
+
+                if not MARGIN_CALL_ACTIVE and detect_margin_call():
+                    log("MARGIN CALL DETECTED! Closing positions...")
+                    MARGIN_CALL_ACTIVE = True
+                    MARGIN_CHECK_COUNT = 0
+                    
+                    try:
+                        safe_api_call(api.close_all)
+                        log("All positions closed")
+                    except Exception as e:
+                        log(f"Close failed: {e}")
+                    
+                    log("Waiting for margin recovery...")
+
+                if MARGIN_CALL_ACTIVE:
+                    if detect_margin_call():
+                        MARGIN_CHECK_COUNT += 1
+                        log(f"Margin call active - waiting ({MARGIN_CHECK_COUNT}/10)...")
+                        
+                        if MARGIN_CHECK_COUNT >= 10:
+                            log("Max wait exceeded, exiting...")
+                            break
+                        
+                        time.sleep(MARGIN_RECOVERY_WAIT)
+                        continue
+                    else:
+                        log("Margin recovered! Resuming trading...")
+                        MARGIN_CALL_ACTIVE = False
+                        MARGIN_CHECK_COUNT = 0
+                        for symbol in SYMBOL_MAP:
+                            tick_buffers[symbol].clear()
+                        continue
+
+                # Check EOD close
+                if should_close_eod():
+                    log("End of day - closing all positions...")
+                    try:
+                        safe_api_call(api.close_all)
+                    except:
+                        pass
+                    log("Exiting for EOD...")
+                    break
+
+                # Get current equity
+                equity = get_account_equity()
+
+                # Check drawdown
+                can_trade, peak_equity, drawdown_paused = check_max_drawdown(equity, peak_equity, drawdown_paused)
+                if not can_trade:
+                    log(f"Max drawdown ({MAX_DRAWDOWN_PERCENT*100}%) reached - pausing for today")
+                    try:
+                        safe_api_call(api.close_all)
+                    except:
+                        pass
+                    break
+
+                # Check equity minimum
+                if equity and equity < MIN_EQUITY_THRESHOLD:
+                    log(f"Equity ${equity:,.2f} below minimum ${MIN_EQUITY_THRESHOLD:,} - stopping...")
+                    break
+
+                # Check margin usage
+                margin_usage = get_margin_usage()
+                if margin_usage > MAX_MARGIN_USAGE_PERCENT:
+                    log(f"Margin usage {margin_usage*100:.1f}% > {MAX_MARGIN_USAGE_PERCENT*100:.0f}%, skipping...")
+
                 prices = get_latest_prices()
+
+                if not prices:
+                    log(f"No prices received, will retry...")
+                    time.sleep(15)
+                    continue
+
                 for ctrader_symbol, price_data in prices.items():
                     bid = price_data.get("bid", 0)
                     ask = price_data.get("ask", 0)
@@ -447,17 +763,35 @@ def main():
                                             combined_conf > COMBINED_CONF_THRESHOLD) else "NO"
                     log(f"{symbol.upper()}: opp={opp_pred:.2f}, dir={dir_pred:.2f}, combined={combined_conf:.2f} -> {meets_thresh}")
 
-                    if opp_pred > OPP_THRESHOLD:
+                    if meets_thresh == "YES":
+                        # Determine signal direction first for correlation check
                         if dir_pred > DIR_LONG_THRESHOLD:
-                            signal_type = "LONG"
-                            signals.append(
-                                (symbol, combined_conf, signal_type, dir_pred)
-                            )
+                            current_signal_type = "LONG"
                         elif dir_pred < DIR_SHORT_THRESHOLD:
-                            signal_type = "SHORT"
-                            signals.append(
-                                (symbol, combined_conf, signal_type, dir_pred)
-                            )
+                            current_signal_type = "SHORT"
+                        else:
+                            current_signal_type = None
+                        
+                        # Check correlation with current direction
+                        if current_signal_type and has_correlated_position(symbol, current_signal_type):
+                            log(f"Correlated position exists for {symbol}, skipping")
+                        
+                        # Check max concurrent positions
+                        elif get_open_positions_count() >= MAX_CONCURRENT_POSITIONS:
+                            log(f"Max positions ({MAX_CONCURRENT_POSITIONS}) reached for {symbol}, skipping")
+                        
+                        # Add to signals if passing all checks
+                        elif opp_pred > OPP_THRESHOLD:
+                            if dir_pred > DIR_LONG_THRESHOLD:
+                                signal_type = "LONG"
+                                signals.append(
+                                    (symbol, combined_conf, signal_type, dir_pred)
+                                )
+                            elif dir_pred < DIR_SHORT_THRESHOLD:
+                                signal_type = "SHORT"
+                                signals.append(
+                                    (symbol, combined_conf, signal_type, dir_pred)
+                                )
 
                 trade_signals = [s for s in signals if s[1] > COMBINED_CONF_THRESHOLD]
                 trade_signals.sort(key=lambda x: x[1], reverse=True)
@@ -469,14 +803,17 @@ def main():
                             log(f"  {symbol.upper()}: Position already open, skipping")
                             continue
                         
-                        lot = calculate_lot_size(balance, RISK_PER_TRADE, SL_PIPS)
+                        equity = get_account_equity()
+                        max_lot_buffer = calculate_max_lot_size(equity)
+                        dynamic_lot = calculate_dynamic_lot_size(equity, initial_equity)
+                        lot = min(max_lot_buffer, dynamic_lot)
 
                         if signal_type == "LONG":
                             place_trade("BUY", symbol, lot, SL_PIPS, TP_PIPS)
                         else:
                             place_trade("SELL", symbol, lot, SL_PIPS, TP_PIPS)
 
-                        log(f"  {symbol.upper()}: {signal_type} | Conf: {conf:.3f}")
+                        log(f"  {symbol.upper()}: {signal_type} | Conf: {conf:.3f} | Lot: {lot:.2f}")
 
                 time.sleep(15)
 
