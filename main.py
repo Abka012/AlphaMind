@@ -29,6 +29,11 @@ SYMBOL_MAP = {
     "audusd": "AUDUSD",
     "usdcad": "USDCAD",
     "usdchf": "USDCHF",
+    "nzusd": "NZDUSD",
+    "eurjpy": "EURJPY",
+    "gbpjpy": "GBPJPY",
+    "audjpy": "AUDJPY",
+    "eurgbp": "EURGBP",
 }
 
 TICK_HISTORY = 200
@@ -69,8 +74,10 @@ def check_connection():
 def reconnect(max_retries=5):
     global api
     for attempt in range(max_retries):
-        wait_time = (2 ** attempt) + random.uniform(0, 1)
-        log(f"Reconnecting... attempt {attempt+1}/{max_retries}, wait {wait_time:.1f}s")
+        wait_time = (2**attempt) + random.uniform(0, 1)
+        log(
+            f"Reconnecting... attempt {attempt + 1}/{max_retries}, wait {wait_time:.1f}s"
+        )
         time.sleep(wait_time)
         try:
             api = Ctrader(CTRADER_HOST, CTRADER_ACCOUNT, CTRADER_PASSWORD)
@@ -86,10 +93,11 @@ def reconnect(max_retries=5):
     log("Max retries reached")
     return False
 
+
 OPP_THRESHOLD = 0.50
 DIR_LONG_THRESHOLD = 0.52
 DIR_SHORT_THRESHOLD = 0.48
-COMBINED_CONF_THRESHOLD = 0.25
+COMBINED_CONF_THRESHOLD = 0.40
 
 RISK_PER_TRADE = 0.02
 SL_PIPS = 10
@@ -115,12 +123,17 @@ MAX_MARGIN_USAGE_PERCENT = 0.50
 
 # Correlation Filter
 CORRELATED_PAIRS = {
-    "EURUSD": ["GBPUSD", "USDCHF"],
-    "GBPUSD": ["EURUSD", "USDCHF"],
-    "USDJPY": [],
-    "AUDUSD": [],
+    "EURUSD": ["GBPUSD", "USDCHF", "EURGBP"],
+    "GBPUSD": ["EURUSD", "USDCHF", "EURGBP"],
+    "USDJPY": ["EURJPY", "GBPJPY", "AUDJPY"],
+    "AUDUSD": ["NZDUSD"],
     "USDCAD": [],
     "USDCHF": ["EURUSD", "GBPUSD"],
+    "NZDUSD": ["AUDUSD"],
+    "EURJPY": ["GBPJPY", "USDJPY"],
+    "GBPJPY": ["EURJPY", "USDJPY"],
+    "AUDJPY": ["USDJPY"],
+    "EURGBP": ["EURUSD", "GBPUSD"],
 }
 
 # State tracking
@@ -150,18 +163,18 @@ def check_connection():
 def detect_margin_call():
     try:
         positions = safe_api_call(api.positions, timeout=3)
-        
+
         # Only consider it a margin call if we get actual position data with state field
         if positions is not None and len(positions) > 0:
             for pos in positions:
                 state = pos.get("state", "")
                 if state in ["margin_call", "liquidating", "stop_out"]:
                     return True
-        
+
         # If positions returns empty list (normal state), that's not a margin call
         # Only return True if we get explicit margin call state
         return False
-        
+
     except:
         return False  # Don't treat API errors as margin call
 
@@ -169,8 +182,8 @@ def detect_margin_call():
 def get_account_equity():
     try:
         account_info = safe_api_call(api.accountInfo)
-        if account_info and 'balance' in account_info:
-            return float(account_info['balance'])
+        if account_info and "balance" in account_info:
+            return float(account_info["balance"])
         return None
     except:
         return None
@@ -198,20 +211,20 @@ def calculate_dynamic_lot_size(equity, initial):
 def check_max_drawdown(equity, peak, paused):
     if equity is None:
         return True, peak, paused
-    
+
     if peak is None:
         peak = equity
-    
+
     if equity > peak:
         peak = equity
         if paused:
             paused = False
         return True, peak, False
-    
+
     drawdown = (peak - equity) / peak
     if drawdown >= MAX_DRAWDOWN_PERCENT and not paused:
         return False, peak, True
-    
+
     return True, peak, paused
 
 
@@ -220,19 +233,19 @@ def get_margin_usage():
         positions = safe_api_call(api.positions, timeout=3)
         if not positions:
             return 0.0
-        
+
         total_margin = 0
         for pos in positions:
             margin = pos.get("margin", 0)
             if margin:
                 total_margin += float(margin)
-        
+
         account_info = safe_api_call(api.accountInfo)
-        if account_info and 'balance' in account_info:
-            equity = float(account_info['balance'])
+        if account_info and "balance" in account_info:
+            equity = float(account_info["balance"])
             if equity > 0:
                 return total_margin / equity
-        
+
         return 0.0
     except:
         return 0.0
@@ -251,18 +264,18 @@ def has_correlated_position(symbol, direction):
         positions = safe_api_call(api.positions, timeout=3)
         if not positions:
             return False
-        
+
         correlated = CORRELATED_PAIRS.get(symbol, [])
         direction_map = {"LONG": "buy", "SHORT": "sell"}
         trade_direction = direction_map.get(direction, "")
-        
+
         for pos in positions:
             pos_symbol = pos.get("symbol", "").upper()
             if pos_symbol in correlated:
                 pos_type = pos.get("type", "").lower()
                 if pos_type == trade_direction:
                     return True
-        
+
         return False
     except:
         return False
@@ -488,16 +501,12 @@ def place_trade(direction, symbol, lot, sl_pips, tp_pips):
             sl = round(bid - (sl_pips * pip_val), digits)
             tp = round(bid + (tp_pips * pip_val), digits)
             api.buy(ctrader_symbol, lot, sl, tp)
-            log(
-                f"Trade BUY {ctrader_symbol} | Lot: {lot} | SL: {sl} | TP: {tp}"
-            )
+            log(f"Trade BUY {ctrader_symbol} | Lot: {lot} | SL: {sl} | TP: {tp}")
         else:
             sl = round(ask + (sl_pips * pip_val), digits)
             tp = round(ask - (tp_pips * pip_val), digits)
             api.sell(ctrader_symbol, lot, sl, tp)
-            log(
-                f"Trade SELL {ctrader_symbol} | Lot: {lot} | SL: {sl} | TP: {tp}"
-            )
+            log(f"Trade SELL {ctrader_symbol} | Lot: {lot} | SL: {sl} | TP: {tp}")
 
         return True
 
@@ -535,8 +544,9 @@ def log(msg):
 def main():
     global api
 
-    import sys
     import io
+    import sys
+
     sys.stderr = io.StringIO()
 
     if (
@@ -561,7 +571,12 @@ def main():
     log(f"Account: {CTRADER_ACCOUNT}")
     log(f"Broker: {CTRADER_BROKER}")
 
-    global MARGIN_CALL_ACTIVE, MARGIN_CHECK_COUNT, peak_equity, drawdown_paused, initial_equity
+    global \
+        MARGIN_CALL_ACTIVE, \
+        MARGIN_CHECK_COUNT, \
+        peak_equity, \
+        drawdown_paused, \
+        initial_equity
 
     try:
         api = Ctrader(CTRADER_HOST, CTRADER_ACCOUNT, CTRADER_PASSWORD)
@@ -591,7 +606,7 @@ def main():
     try:
         positions = safe_api_call(api.positions)
         log(f"Open positions: {len(positions) if positions else 0}")
-        
+
         global initial_equity, peak_equity
         equity = get_account_equity()
         if equity:
@@ -642,24 +657,26 @@ def main():
                     log("MARGIN CALL DETECTED! Closing positions...")
                     MARGIN_CALL_ACTIVE = True
                     MARGIN_CHECK_COUNT = 0
-                    
+
                     try:
                         safe_api_call(api.close_all)
                         log("All positions closed")
                     except Exception as e:
                         log(f"Close failed: {e}")
-                    
+
                     log("Waiting for margin recovery...")
 
                 if MARGIN_CALL_ACTIVE:
                     if detect_margin_call():
                         MARGIN_CHECK_COUNT += 1
-                        log(f"Margin call active - waiting ({MARGIN_CHECK_COUNT}/10)...")
-                        
+                        log(
+                            f"Margin call active - waiting ({MARGIN_CHECK_COUNT}/10)..."
+                        )
+
                         if MARGIN_CHECK_COUNT >= 10:
                             log("Max wait exceeded, exiting...")
                             break
-                        
+
                         time.sleep(MARGIN_RECOVERY_WAIT)
                         continue
                     else:
@@ -674,9 +691,13 @@ def main():
                 equity = get_account_equity()
 
                 # Check drawdown
-                can_trade, peak_equity, drawdown_paused = check_max_drawdown(equity, peak_equity, drawdown_paused)
+                can_trade, peak_equity, drawdown_paused = check_max_drawdown(
+                    equity, peak_equity, drawdown_paused
+                )
                 if not can_trade:
-                    log(f"Max drawdown ({MAX_DRAWDOWN_PERCENT*100}%) reached - pausing for today")
+                    log(
+                        f"Max drawdown ({MAX_DRAWDOWN_PERCENT * 100}%) reached - pausing for today"
+                    )
                     try:
                         safe_api_call(api.close_all)
                     except:
@@ -685,13 +706,17 @@ def main():
 
                 # Check equity minimum
                 if equity and equity < MIN_EQUITY_THRESHOLD:
-                    log(f"Equity ${equity:,.2f} below minimum ${MIN_EQUITY_THRESHOLD:,} - stopping...")
+                    log(
+                        f"Equity ${equity:,.2f} below minimum ${MIN_EQUITY_THRESHOLD:,} - stopping..."
+                    )
                     break
 
                 # Check margin usage
                 margin_usage = get_margin_usage()
                 if margin_usage > MAX_MARGIN_USAGE_PERCENT:
-                    log(f"Margin usage {margin_usage*100:.1f}% > {MAX_MARGIN_USAGE_PERCENT*100:.0f}%, skipping...")
+                    log(
+                        f"Margin usage {margin_usage * 100:.1f}% > {MAX_MARGIN_USAGE_PERCENT * 100:.0f}%, skipping..."
+                    )
 
                 prices = get_latest_prices()
 
@@ -732,10 +757,21 @@ def main():
 
                     combined_conf = calculate_combined_confidence(opp_pred, dir_pred)
 
-                    meets_thresh = "YES" if (opp_pred > OPP_THRESHOLD and 
-                                            (dir_pred > DIR_LONG_THRESHOLD or dir_pred < DIR_SHORT_THRESHOLD) and
-                                            combined_conf > COMBINED_CONF_THRESHOLD) else "NO"
-                    log(f"{symbol.upper()}: opp={opp_pred:.2f}, dir={dir_pred:.2f}, combined={combined_conf:.2f} -> {meets_thresh}")
+                    meets_thresh = (
+                        "YES"
+                        if (
+                            opp_pred > OPP_THRESHOLD
+                            and (
+                                dir_pred > DIR_LONG_THRESHOLD
+                                or dir_pred < DIR_SHORT_THRESHOLD
+                            )
+                            and combined_conf > COMBINED_CONF_THRESHOLD
+                        )
+                        else "NO"
+                    )
+                    log(
+                        f"{symbol.upper()}: opp={opp_pred:.2f}, dir={dir_pred:.2f}, combined={combined_conf:.2f} -> {meets_thresh}"
+                    )
 
                     if meets_thresh == "YES":
                         # Determine signal direction first for correlation check
@@ -745,15 +781,19 @@ def main():
                             current_signal_type = "SHORT"
                         else:
                             current_signal_type = None
-                        
+
                         # Check correlation with current direction
-                        if current_signal_type and has_correlated_position(symbol, current_signal_type):
+                        if current_signal_type and has_correlated_position(
+                            symbol, current_signal_type
+                        ):
                             log(f"Correlated position exists for {symbol}, skipping")
-                        
+
                         # Check max concurrent positions
                         elif get_open_positions_count() >= MAX_CONCURRENT_POSITIONS:
-                            log(f"Max positions ({MAX_CONCURRENT_POSITIONS}) reached for {symbol}, skipping")
-                        
+                            log(
+                                f"Max positions ({MAX_CONCURRENT_POSITIONS}) reached for {symbol}, skipping"
+                            )
+
                         # Add to signals if passing all checks
                         elif opp_pred > OPP_THRESHOLD:
                             if dir_pred > DIR_LONG_THRESHOLD:
@@ -776,7 +816,7 @@ def main():
                         if has_open_position(symbol):
                             log(f"  {symbol.upper()}: Position already open, skipping")
                             continue
-                        
+
                         equity = get_account_equity()
                         max_lot_buffer = calculate_max_lot_size(equity)
                         dynamic_lot = calculate_dynamic_lot_size(equity, initial_equity)
@@ -787,7 +827,9 @@ def main():
                         else:
                             place_trade("SELL", symbol, lot, SL_PIPS, TP_PIPS)
 
-                        log(f"  {symbol.upper()}: {signal_type} | Conf: {conf:.3f} | Lot: {lot:.2f}")
+                        log(
+                            f"  {symbol.upper()}: {signal_type} | Conf: {conf:.3f} | Lot: {lot:.2f}"
+                        )
 
                 time.sleep(15)
 

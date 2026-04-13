@@ -5,9 +5,21 @@ import pandas as pd
 from tqdm import tqdm
 
 
-SYMBOLS = ["eurusd", "gbpusd", "usdjpy", "audusd", "usdcad", "usdchf"]
+SYMBOLS = ["eurusd", "gbpusd", "usdjpy", "audusd", "usdcad", "usdchf", "nzusd", "eurjpy", "gbpjpy", "audjpy", "eurgbp"]
 HORIZON = 1000  # ticks ahead (matches training)
-THRESHOLD = 0.40  # minimum combined confidence to trade
+
+# Thresholds - aligned with main.py
+OPP_THRESHOLD = 0.50
+DIR_LONG_THRESHOLD = 0.52
+DIR_SHORT_THRESHOLD = 0.45
+COMBINED_CONF_THRESHOLD = 0.40
+
+
+def calculate_combined_confidence(opp_pred, dir_pred):
+    if dir_pred > 0.5:
+        return opp_pred * dir_pred
+    else:
+        return opp_pred * (1 - dir_pred)
 
 
 def run_backtest(symbol):
@@ -62,11 +74,14 @@ def run_backtest(symbol):
     
     pip_value = get_pip_value(symbol)
     
-    # Apply thresholds
-    trade_mask = opp_pred > 0.70
+    # Calculate combined confidence
+    combined_conf = calculate_combined_confidence(opp_pred, dir_pred)
+    
+    # Apply thresholds - aligned with main.py
+    trade_mask = opp_pred > OPP_THRESHOLD
     positions = np.zeros(len(dir_pred))
-    positions[trade_mask & (dir_pred > 0.55)] = 1
-    positions[trade_mask & (dir_pred < 0.45)] = -1
+    positions[trade_mask & (dir_pred > DIR_LONG_THRESHOLD) & (combined_conf > COMBINED_CONF_THRESHOLD)] = 1
+    positions[trade_mask & (dir_pred < DIR_SHORT_THRESHOLD) & (combined_conf > COMBINED_CONF_THRESHOLD)] = -1
     
     close_prices = df["close"].values
     

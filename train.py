@@ -7,7 +7,7 @@ import xgboost as xgb
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
-SYMBOLS = ["eurusd", "gbpusd", "usdjpy", "audusd", "usdcad", "usdchf"]
+SYMBOLS = ["eurusd", "gbpusd", "usdjpy", "audusd", "usdcad", "usdchf", "nzusd", "eurjpy", "gbpjpy", "audjpy", "eurgbp"]
 HORIZON = 1000  # ticks ahead to predict (~3-15 minutes)
 
 
