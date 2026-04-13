@@ -80,6 +80,11 @@ This will create:
 - `data/raw_ticks/audusd.csv`
 - `data/raw_ticks/usdcad.csv`
 - `data/raw_ticks/usdchf.csv`
+- `data/raw_ticks/nzusd.csv`
+- `data/raw_ticks/eurjpy.csv`
+- `data/raw_ticks/gbpjpy.csv`
+- `data/raw_ticks/audjpy.csv`
+- `data/raw_ticks/eurgbp.csv`
 
 **Data format (tick-level):**
 - `timestamp` - UTC datetime
@@ -90,7 +95,7 @@ This will create:
 
 ## Training
 
-Train models for all 6 pairs:
+Train models for all 11 pairs:
 ```bash
 python train.py
 ```
@@ -139,7 +144,7 @@ The bot will:
 OPP_THRESHOLD = 0.50           # Minimum opportunity probability (0.50-0.70)
 DIR_LONG_THRESHOLD = 0.52      # Direction threshold for LONG (0.52-0.55)
 DIR_SHORT_THRESHOLD = 0.48    # Direction threshold for SHORT (0.45-0.48)
-COMBINED_CONF_THRESHOLD = 0.25 # Minimum combined confidence (0.25-0.40)
+COMBINED_CONF_THRESHOLD = 0.40 # Minimum combined confidence (0.25-0.40)
 
 # Risk Management
 RISK_PER_TRADE = 0.02          # 2% risk per trade (used for dynamic lot sizing)
@@ -153,7 +158,7 @@ MIN_EQUITY_THRESHOLD = 10000   # Minimum equity required to trade
 
 # Risk Management
 MAX_DRAWDOWN_PERCENT = 0.05   # 5% loss from peak triggers pause for the day
-MAX_CONCURRENT_POSITIONS = 2  # Maximum open positions at once
+MAX_CONCURRENT_POSITIONS = 4  # Maximum open positions at once
 MAX_MARGIN_USAGE_PERCENT = 0.50  # Don't open new trades if margin usage > 50%
 
 # Correlation Filter
@@ -188,7 +193,7 @@ The bot includes comprehensive margin call prevention and risk management:
 #### Position Management
 | Feature | Description |
 |---------|-------------|
-| **Max Positions** | Maximum 2 concurrent open positions |
+| **Max Positions** | Maximum 4 concurrent open positions |
 | **Margin Usage Check** | Skip new trades if margin usage > 50% |
 | **Correlation Filter** | Avoids same-direction trades on correlated pairs |
 
@@ -246,7 +251,7 @@ If all retries fail, the bot logs the failure and exits cleanly rather than hang
      - Get model predictions
      - Calculate combined confidence
      - Check thresholds
-     - Check max positions (max 2)
+     - Check max positions (max 4)
      - Check correlation filter
    - Execute trades with dynamic lot sizing (scales with equity)
 
@@ -302,12 +307,22 @@ AlphaMind/
 
 ## Supported Pairs
 
+### Major Pairs (7)
 1. EURUSD - Euro/US Dollar
 2. GBPUSD - British Pound/US Dollar
 3. USDJPY - US Dollar/Japanese Yen
 4. AUDUSD - Australian Dollar/US Dollar
 5. USDCAD - US Dollar/Canadian Dollar
 6. USDCHF - US Dollar/Swiss Franc
+7. NZDUSD - New Zealand Dollar/US Dollar
+
+### Cross Pairs (4)
+8. EURJPY - Euro/Japanese Yen
+9. GBPJPY - British Pound/Japanese Yen
+10. AUDJPY - Australian Dollar/Japanese Yen
+11. EURGBP - Euro/British Pound
+
+**Total: 11 symbols**
 
 ## Troubleshooting
 
@@ -385,7 +400,7 @@ The bot includes multiple layers of protection:
 2. **Dynamic Lot Sizing**: Lot size scales down as equity decreases
 3. **Max Drawdown**: Pauses trading for the day after 5% loss from peak
 4. **Min Equity**: Stops if equity drops below $10,000
-5. **Max Positions**: Limits to 2 concurrent trades
+5. **Max Positions**: Limits to 4 concurrent trades
 6. **Margin Usage**: Skips new trades if margin usage > 50%
 7. **Correlation Filter**: Avoids same-direction trades on correlated pairs (EURUSD/GBPUSD/USDCHF)
 
