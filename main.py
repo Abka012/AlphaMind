@@ -4,6 +4,7 @@ import socket
 import sys
 import time
 import traceback
+import warnings
 from collections import deque
 
 import joblib
@@ -39,6 +40,8 @@ COMBINED_CONF_THRESHOLD = 0.40
 RISK_PER_TRADE = 0.02
 SL_PIPS = 10
 TP_PIPS = 20
+
+DEFAULT_BALANCE = 1000000  # Set to your actual account balance
 
 api = None
 
@@ -103,18 +106,23 @@ def predict(df, model_data):
 
 
 def get_latest_prices():
+    prices = {}
+    for symbol in SYMBOL_MAP.values():
+        try:
+            q = api.quote(symbol)
+            if q:
+                if "bid" in q and "ask" in q:
+                    prices[symbol] = q
+                elif "last" in q:
+                    prices[symbol] = {"bid": q["last"], "ask": q["last"]}
+        except Exception as e:
+            pass
+
+    if prices:
+        return prices
+
     try:
-        log("Trying api.quote()...")
-        quotes = api.quote()
-        log(f"Quote result: {quotes}")
-        if quotes:
-            log(f"Got {len(quotes)} quotes")
-            return quotes
-        
-        log("Trying api.positions()...")
         positions = api.positions()
-        log(f"Positions result: {positions}")
-        prices = {}
         for pos in positions:
             symbol = pos.get("symbol", "")
             if symbol:
@@ -122,12 +130,8 @@ def get_latest_prices():
                     "bid": pos.get("bid", 0),
                     "ask": pos.get("ask", 0),
                 }
-        log(f"Got {len(prices)} prices from positions")
         return prices
-    except Exception as e:
-        log(f"Failed to get prices: {e}")
-        import traceback
-        traceback.print_exc()
+    except:
         return {}
 
 
@@ -164,13 +168,16 @@ def compute_live_features(symbol):
         )
 
     features["tick_std"] = df["close"].rolling(window=100, min_periods=1).std().iloc[-1]
+    df["tick_std"] = df["close"].rolling(window=100, min_periods=1).std()
     features["tick_std_50"] = (
         df["close"].rolling(window=50, min_periods=1).std().iloc[-1]
     )
 
     for shift in [10, 50, 100]:
         if len(df) > shift:
-            features[f"tick_momentum_{shift}"] = df["close"].iloc[-1] - df["close"].iloc[-shift - 1]
+            features[f"tick_momentum_{shift}"] = (
+                df["close"].iloc[-1] - df["close"].iloc[-shift - 1]
+            )
         else:
             features[f"tick_momentum_{shift}"] = 0
 
@@ -198,6 +205,7 @@ def compute_live_features(symbol):
     )
     features["tick_volume_spike"] = 1 if features["tick_volume_ratio"] > 2 else 0
 
+    features["tick_spread"] = df["tick_spread"].iloc[-1]
     spread_pct = features["tick_spread"] / (df["close"].iloc[-1] + 1e-9)
     features["tick_spread_pct"] = spread_pct
 
@@ -229,7 +237,8 @@ def calculate_lot_size(balance, risk_pct, sl_pips):
     risk_amount = balance * risk_pct
     pip_value = 10
     lot = risk_amount / (sl_pips * pip_value)
-    return round(max(lot, 0.01), 2)
+    max_lot = 100.0
+    return round(min(max(lot, 0.01), max_lot), 2)
 
 
 def get_pip_value(symbol):
@@ -239,6 +248,15 @@ def get_pip_value(symbol):
 
 def place_trade(direction, symbol, lot, sl_pips, tp_pips):
     ctrader_symbol = SYMBOL_MAP.get(symbol, symbol.upper())
+
+    try:
+        positions = api.positions()
+        for pos in positions:
+            if pos.get("symbol", "").upper() == ctrader_symbol.upper():
+                log(f"Position already exists for {ctrader_symbol}, skipping")
+                return False
+    except:
+        pass
 
     try:
         prices = get_latest_prices()
@@ -251,20 +269,21 @@ def place_trade(direction, symbol, lot, sl_pips, tp_pips):
             return False
 
         pip_val = get_pip_value(symbol)
+        digits = 3 if symbol.lower() == "usdjpy" else 5
 
         if direction == "BUY":
-            sl = bid - (sl_pips * pip_val)
-            tp = bid + (tp_pips * pip_val)
+            sl = round(bid - (sl_pips * pip_val), digits)
+            tp = round(bid + (tp_pips * pip_val), digits)
             api.buy(ctrader_symbol, lot, sl, tp)
             log(
-                f"Trade BUY {ctrader_symbol} | Lot: {lot} | SL: {sl:.5f} | TP: {tp:.5f}"
+                f"Trade BUY {ctrader_symbol} | Lot: {lot} | SL: {sl} | TP: {tp}"
             )
         else:
-            sl = ask + (sl_pips * pip_val)
-            tp = ask - (tp_pips * pip_val)
+            sl = round(ask + (sl_pips * pip_val), digits)
+            tp = round(ask - (tp_pips * pip_val), digits)
             api.sell(ctrader_symbol, lot, sl, tp)
             log(
-                f"Trade SELL {ctrader_symbol} | Lot: {lot} | SL: {sl:.5f} | TP: {tp:.5f}"
+                f"Trade SELL {ctrader_symbol} | Lot: {lot} | SL: {sl} | TP: {tp}"
             )
 
         return True
@@ -301,6 +320,10 @@ def log(msg):
 def main():
     global api
 
+    import sys
+    import io
+    sys.stderr = io.StringIO()
+
     if (
         not CTRADER_HOST
         or not CTRADER_ACCOUNT
@@ -318,7 +341,7 @@ def main():
         print("  CTRADER_PORT=5212 (default)")
         sys.exit(1)
 
-    log("Initializing HFT Bot...")
+    log("Initializing MFT Bot...")
     log(f"Host: {CTRADER_HOST}")
     log(f"Account: {CTRADER_ACCOUNT}")
     log(f"Broker: {CTRADER_BROKER}")
@@ -341,14 +364,22 @@ def main():
     log("Connected to cTrader!")
 
     try:
+        log("Subscribing to symbols...")
+        for symbol in SYMBOL_MAP.values():
+            api.subscribe(symbol)
+        time.sleep(2)
+    except Exception as e:
+        log(f"Subscribe warning: {e}")
+
+    try:
         positions = api.positions()
         log(f"Open positions: {len(positions)}")
-        balance = 10000
+        balance = DEFAULT_BALANCE
     except Exception as e:
         log(f"Failed to get positions: {e}")
-        balance = 10000
+        balance = DEFAULT_BALANCE
 
-    log(f"Account balance: ${balance:.2f} (demo)")
+    log(f"Account balance: ${balance:,.2f} (demo)")
 
     models = load_all_models()
 
@@ -387,10 +418,13 @@ def main():
 
                 signals = []
 
-                for symbol, model_data in models.items():
-                    if has_open_position(symbol):
-                        continue
+                min_ticks = min(len(tick_buffers[s]) for s in tick_buffers)
+                if min_ticks < 50:
+                    log(
+                        f"Tick buffers: {', '.join(f'{s}:{len(tick_buffers[s])}' for s in tick_buffers)}"
+                    )
 
+                for symbol, model_data in models.items():
                     features = compute_live_features(symbol)
                     if features is None:
                         continue
@@ -407,6 +441,11 @@ def main():
                     dir_pred = model_dir.predict_proba(X)[0, 1]
 
                     combined_conf = calculate_combined_confidence(opp_pred, dir_pred)
+
+                    meets_thresh = "YES" if (opp_pred > OPP_THRESHOLD and 
+                                            (dir_pred > DIR_LONG_THRESHOLD or dir_pred < DIR_SHORT_THRESHOLD) and
+                                            combined_conf > COMBINED_CONF_THRESHOLD) else "NO"
+                    log(f"{symbol.upper()}: opp={opp_pred:.2f}, dir={dir_pred:.2f}, combined={combined_conf:.2f} -> {meets_thresh}")
 
                     if opp_pred > OPP_THRESHOLD:
                         if dir_pred > DIR_LONG_THRESHOLD:
@@ -426,6 +465,10 @@ def main():
                 if trade_signals:
                     log(f"Found {len(trade_signals)} trade signal(s):")
                     for symbol, conf, signal_type, direction in trade_signals:
+                        if has_open_position(symbol):
+                            log(f"  {symbol.upper()}: Position already open, skipping")
+                            continue
+                        
                         lot = calculate_lot_size(balance, RISK_PER_TRADE, SL_PIPS)
 
                         if signal_type == "LONG":

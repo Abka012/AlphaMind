@@ -30,7 +30,7 @@ pip install -r requirements.txt
 Contact your broker to get FIX API credentials. You'll need:
 
 | Variable | Description | Example |
-|----------|------------|----------|
+|----------|-------------|---------|
 | `CTRADER_HOST` | FIX API server host | `demo-uk-eqx-01.p.c-trader.com` |
 | `CTRADER_PORT` | FIX port (SSL) | `5212` |
 | `CTRADER_ACCOUNT` | SenderCompID | `demo.icmarkets.9973397` |
@@ -126,22 +126,55 @@ python main.py
 The bot will:
 1. Connect to cTrader FIX API
 2. Load all available models from `saved_models/`
-3. Fetch live prices from cTrader
-4. Compute features and get predictions from ALL models
-5. Calculate combined confidence: `opp × dir` (long) or `opp × (1-dir)` (short)
-6. Trade ALL pairs where combined confidence > 0.40
+3. Subscribe to live price feeds for all symbol pairs
+4. Accumulate tick data in buffers (needs 50+ ticks before trading)
+5. Compute features and get predictions from ALL models
+6. Calculate combined confidence: `opp × dir` (long) or `opp × (1-dir)` (short)
+7. Execute trades where combined confidence > threshold
+8. Check for existing positions before placing new trades
 
 ### Trading Parameters (in main.py)
 ```python
-OPP_THRESHOLD = 0.70        # Minimum opportunity probability
-DIR_LONG_THRESHOLD = 0.55   # Direction threshold for LONG
-DIR_SHORT_THRESHOLD = 0.45 # Direction threshold for SHORT
-COMBINED_CONF_THRESHOLD = 0.40  # Minimum combined confidence
+# Thresholds for trade signals
+OPP_THRESHOLD = 0.70           # Minimum opportunity probability (0.50-0.70)
+DIR_LONG_THRESHOLD = 0.55      # Direction threshold for LONG (0.52-0.55)
+DIR_SHORT_THRESHOLD = 0.45    # Direction threshold for SHORT (0.45-0.48)
+COMBINED_CONF_THRESHOLD = 0.40 # Minimum combined confidence (0.25-0.40)
 
-RISK_PER_TRADE = 0.02      # 2% risk per trade
-SL_PIPS = 10              # Stop loss in pips
-TP_PIPS = 20              # Take profit in pips
+# Risk Management
+RISK_PER_TRADE = 0.02          # 2% risk per trade
+SL_PIPS = 10                   # Stop loss in pips
+TP_PIPS = 20                   # Take profit in pips (2:1 reward:risk)
+
+# Account
+DEFAULT_BALANCE = 1000000      # Default account balance (adjust as needed)
 ```
+
+### Bot Workflow
+
+1. **Initialization**: Connect to cTrader, subscribe to symbols, load models
+2. **Warm-up**: Wait for 50 ticks per symbol to accumulate in buffers (~12+ minutes)
+3. **Trading Loop** (every 15 seconds):
+   - Fetch latest prices for all symbols
+   - Update tick buffers with new price data
+   - Compute features for each symbol
+   - Get model predictions (opportunity + direction)
+   - Calculate combined confidence score
+   - Filter signals by thresholds
+   - Check for existing positions
+   - Execute trades with proper lot sizing
+
+### Lot Size Calculation
+
+```python
+lot = (balance × risk%) / (SL_pips × pip_value)
+max_lot = 100.0  # Cap to prevent excessive position sizing
+```
+
+Example for $1M account with 2% risk:
+- Risk amount: $20,000
+- SL: 10 pips × $10/pip = $100 per lot
+- Lot size: $20,000 / $100 = 200 lots → capped at 100
 
 ## Model Features (25 features)
 
@@ -213,20 +246,44 @@ AlphaMind/
 - Market may be closed (weekends)
 - Demo accounts may not have weekend pricing
 - Wait for market open (Monday ~5pm EST)
+- Call `api.subscribe(symbol)` before `api.quote(symbol)`
 
 **"No price for symbol"**
 - Check symbol is in your broker's offering
 - Verify market is open
+
+### Trading Issues
+
+**No trades being placed despite strong signals**
+- Lower thresholds temporarily to test: `OPP_THRESHOLD = 0.50`, `COMBINED_CONF_THRESHOLD = 0.25`
+- Check that tick buffers have reached 50+ ticks
+- Review prediction values in logs
+
+**Trades not executing / duplicate trades**
+- Check cTrader account for open positions
+- The position detection may fail if API returns empty symbol fields
+- Manually close positions from cTrader platform if needed
+
+**Price precision errors**
+- SL/TP prices now rounded to correct decimal places (5 for most pairs, 3 for JPY)
 
 ### General
 
 **"Failed to get account info"**
 - The method names vary by ejtraderCT version
 - Bot uses `positions()` as fallback (defaults to $10,000 balance)
+- Set `DEFAULT_BALANCE` in main.py to match your actual account
 
 **Model errors**
 - Ensure models are trained: run `python train.py` first
 - Check `saved_models/` folder has `.pkl` files
+
+### Performance Notes
+
+- Bot checks for signals every 15 seconds
+- Requires 50+ ticks in buffer before generating predictions (~12+ minutes startup)
+- Each symbol accumulates ticks independently
+- Use demo account for testing before live trading
 
 ## Disclaimer
 
