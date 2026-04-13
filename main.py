@@ -8,7 +8,6 @@ import time
 import traceback
 import warnings
 from collections import deque
-from datetime import datetime
 
 import joblib
 import numpy as np
@@ -124,15 +123,10 @@ CORRELATED_PAIRS = {
     "USDCHF": ["EURUSD", "GBPUSD"],
 }
 
-# Time-Based Limits
-CLOSE_EOD = True
-EOD_CLOSE_HOUR = 21  # 9 PM UTC
-
 # State tracking
 initial_equity = None
 peak_equity = None
 drawdown_paused = False
-last_eod_check = None
 
 MARGIN_CALL_ACTIVE = False
 MARGIN_RECOVERY_WAIT = 60
@@ -272,16 +266,6 @@ def has_correlated_position(symbol, direction):
         return False
     except:
         return False
-
-
-def should_close_eod():
-    if not CLOSE_EOD:
-        return False
-    
-    current_hour = datetime.utcnow().hour
-    if current_hour >= EOD_CLOSE_HOUR:
-        return True
-    return False
 
 
 def load_all_models():
@@ -685,16 +669,6 @@ def main():
                         for symbol in SYMBOL_MAP:
                             tick_buffers[symbol].clear()
                         continue
-
-                # Check EOD close
-                if should_close_eod():
-                    log("End of day - closing all positions...")
-                    try:
-                        safe_api_call(api.close_all)
-                    except:
-                        pass
-                    log("Exiting for EOD...")
-                    break
 
                 # Get current equity
                 equity = get_account_equity()

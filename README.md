@@ -164,10 +164,6 @@ CORRELATED_PAIRS = {
 }
 # (AUDUSD, USDCAD, USDJPY have no strong correlations)
 
-# Time-Based Limits
-CLOSE_EOD = True               # Close all positions at end of day
-EOD_CLOSE_HOUR = 21           # Close after 9 PM UTC
-
 # Reliability
 API_TIMEOUT = 5                # Timeout in seconds for API calls
 MAX_RECONNECT_RETRIES = 5      # Max reconnection attempts
@@ -206,10 +202,15 @@ The bot includes comprehensive margin call prevention and risk management:
 | **Margin Call Detection** | Monitors position state for margin calls |
 | **Auto-Resume** | Automatically resumes trading after margin recovery |
 
-#### Time-Based
+#### Connection & Recovery
 | Feature | Description |
 |---------|-------------|
-| **EOD Close** | Closes all positions at 9 PM UTC |
+| **API Timeout** | 5 second timeout on all cTrader API calls |
+| **Connection Check** | Validates connection before each trading cycle |
+| **Exponential Backoff** | Reconnect wait time: 2^attempt + random jitter |
+| **Max Retries** | 5 attempts before exiting gracefully |
+| **Margin Call Detection** | Monitors position state for margin calls |
+| **Auto-Resume** | Automatically resumes trading after margin recovery |
 
 **Margin Call Handling Flow:**
 1. Detect margin call state from position data
@@ -235,7 +236,6 @@ If all retries fail, the bot logs the failure and exits cleanly rather than hang
    - Check connection health
    - Check for margin call state
      - If margin call: close positions, wait for recovery, auto-resume
-   - Check end-of-day (close all at 9 PM UTC)
    - Check max drawdown (pause if 5% loss from peak)
    - Check equity minimum ($10,000 threshold)
    - Check margin usage (skip if > 50%)
@@ -388,7 +388,6 @@ The bot includes multiple layers of protection:
 5. **Max Positions**: Limits to 2 concurrent trades
 6. **Margin Usage**: Skips new trades if margin usage > 50%
 7. **Correlation Filter**: Avoids same-direction trades on correlated pairs (EURUSD/GBPUSD/USDCHF)
-8. **EOD Close**: Closes all positions at 9 PM UTC
 
 ### General
 
