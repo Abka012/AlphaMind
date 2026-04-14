@@ -23,16 +23,12 @@ HORIZON = 1000  # ticks ahead (matches training)
 # Thresholds - aligned with main.py
 OPP_THRESHOLD = 0.50
 DIR_LONG_THRESHOLD = 0.52
-DIR_SHORT_THRESHOLD = 0.45
+DIR_SHORT_THRESHOLD = 0.48
 COMBINED_CONF_THRESHOLD = 0.40
 
 
 def calculate_combined_confidence(opp_pred, dir_pred):
-    return np.where(
-        dir_pred > 0.5,
-        opp_pred * dir_pred,
-        opp_pred * (1 - dir_pred)
-    )
+    return np.where(dir_pred > 0.5, opp_pred * dir_pred, opp_pred * (1 - dir_pred))
 
 
 def run_backtest(symbol):
@@ -228,15 +224,16 @@ if __name__ == "__main__":
     # Save performance data for dynamic symbol selection
     performance_data = {}
     for r in all_results:
-        performance_data[r['symbol']] = {
+        performance_data[r["symbol"]] = {
             "win_rate": r.get("win_rate", 0),
             "profit_factor": r.get("profit_factor", 0),
-            "trades": r.get("trades", 0)
+            "trades": r.get("trades", 0),
         }
-    
+
     import json
+
     os.makedirs("saved_models", exist_ok=True)
-    with open("saved_models/performance.json", 'w') as f:
+    with open("saved_models/performance.json", "w") as f:
         json.dump(performance_data, f)
-    
+
     print(f"\nPerformance data saved to saved_models/performance.json")
