@@ -224,3 +224,19 @@ if __name__ == "__main__":
     print(f"{'TOTAL':<10} {total_trades:>8}")
     print("=" * 50)
     print(f"✅ Backtest complete!")
+
+    # Save performance data for dynamic symbol selection
+    performance_data = {}
+    for r in all_results:
+        performance_data[r['symbol']] = {
+            "win_rate": r.get("win_rate", 0),
+            "profit_factor": r.get("profit_factor", 0),
+            "trades": r.get("trades", 0)
+        }
+    
+    import json
+    os.makedirs("saved_models", exist_ok=True)
+    with open("saved_models/performance.json", 'w') as f:
+        json.dump(performance_data, f)
+    
+    print(f"\nPerformance data saved to saved_models/performance.json")

@@ -1,4 +1,5 @@
 import glob
+import json
 import os
 import random
 import signal
@@ -12,6 +13,7 @@ from collections import deque
 import joblib
 import numpy as np
 import pandas as pd
+import psutil
 from dotenv import load_dotenv
 from ejtraderCT import Ctrader
 
@@ -36,8 +38,41 @@ SYMBOL_MAP = {
     "eurgbp": "EURGBP",
 }
 
-TICK_HISTORY = 200
-tick_buffers = {symbol: deque(maxlen=TICK_HISTORY) for symbol in SYMBOL_MAP}
+TICK_HISTORY = 50
+
+
+def get_active_symbols(performance_file="saved_models/performance.json", top_n=6):
+    """
+    Load top performing symbols from backtest results.
+    Sorts by profit_factor and returns top N symbols.
+    Falls back to all symbols if file not found.
+    """
+    try:
+        with open(performance_file, 'r') as f:
+            results = json.load(f)
+        
+        sorted_symbols = sorted(
+            results.items(),
+            key=lambda x: x[1].get('profit_factor', 0),
+            reverse=True
+        )
+        
+        top_symbols = dict(sorted_symbols[:top_n])
+        
+        return top_symbols
+    except Exception as e:
+        return SYMBOL_MAP
+
+
+ACTIVE_SYMBOLS = get_active_symbols(top_n=6)
+
+tick_buffers = {symbol: deque(maxlen=TICK_HISTORY) for symbol in ACTIVE_SYMBOLS}
+
+
+def log_memory_usage():
+    process = psutil.Process()
+    mem_mb = process.memory_info().rss / 1024 / 1024
+    log(f"Memory: {mem_mb:.1f}MB")
 
 
 class TimeoutException(Exception):
@@ -84,7 +119,7 @@ def reconnect(max_retries=5):
             time.sleep(2)
             if api.isconnected():
                 log("Reconnected successfully")
-                for symbol in SYMBOL_MAP.values():
+                for symbol in ACTIVE_SYMBOLS.values():
                     safe_api_call(api.subscribe, symbol)
                 time.sleep(1)
                 return True
@@ -331,7 +366,7 @@ def predict(df, model_data):
 
 def get_latest_prices():
     prices = {}
-    for symbol in SYMBOL_MAP.values():
+    for symbol in ACTIVE_SYMBOLS.values():
         try:
             q = safe_api_call(api.quote, symbol)
             if q:
@@ -361,7 +396,9 @@ def get_latest_prices():
 
 
 def update_tick_buffer(symbol, bid, ask):
-    ctrader_symbol = SYMBOL_MAP.get(symbol, symbol.upper())
+    if symbol not in tick_buffers:
+        return
+    ctrader_symbol = ACTIVE_SYMBOLS.get(symbol, symbol.upper())
     mid = (bid + ask) / 2
     tick_buffers[symbol].append(
         {
@@ -472,7 +509,7 @@ def get_pip_value(symbol):
 
 
 def place_trade(direction, symbol, lot, sl_pips, tp_pips):
-    ctrader_symbol = SYMBOL_MAP.get(symbol, symbol.upper())
+    ctrader_symbol = ACTIVE_SYMBOLS.get(symbol, symbol.upper())
 
     try:
         positions = safe_api_call(api.positions)
@@ -516,7 +553,7 @@ def place_trade(direction, symbol, lot, sl_pips, tp_pips):
 
 
 def has_open_position(symbol):
-    ctrader_symbol = SYMBOL_MAP.get(symbol, symbol.upper())
+    ctrader_symbol = ACTIVE_SYMBOLS.get(symbol, symbol.upper())
     try:
         positions = safe_api_call(api.positions)
         if not positions:
@@ -597,7 +634,7 @@ def main():
 
     try:
         log("Subscribing to symbols...")
-        for symbol in SYMBOL_MAP.values():
+        for symbol in ACTIVE_SYMBOLS.values():
             safe_api_call(api.subscribe, symbol)
         time.sleep(2)
     except Exception as e:
@@ -645,7 +682,12 @@ def main():
         log(f"Failed to fetch prices: {e}")
 
     try:
+        cycle_count = 0
         while True:
+            cycle_count += 1
+            if cycle_count % 10 == 0:
+                log_memory_usage()
+            
             try:
                 if not check_connection():
                     log("Connection lost, attempting reconnect...")
@@ -683,7 +725,7 @@ def main():
                         log("Margin recovered! Resuming trading...")
                         MARGIN_CALL_ACTIVE = False
                         MARGIN_CHECK_COUNT = 0
-                        for symbol in SYMBOL_MAP:
+                        for symbol in ACTIVE_SYMBOLS:
                             tick_buffers[symbol].clear()
                         continue
 

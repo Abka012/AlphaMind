@@ -26,3 +26,6 @@ saved_models/*.pth
 
 # Environment
 .env
+
+# Json log
+saved_models/*.json

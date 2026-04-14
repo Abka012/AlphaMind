@@ -130,13 +130,15 @@ python main.py
 
 The bot will:
 1. Connect to cTrader FIX API
-2. Load all available models from `saved_models/`
-3. Subscribe to live price feeds for all symbol pairs
-4. Accumulate tick data in buffers (needs 50+ ticks before trading)
-5. Compute features and get predictions from ALL models
-6. Calculate combined confidence: `opp × dir` (long) or `opp × (1-dir)` (short)
-7. Execute trades where combined confidence > threshold
-8. Check for existing positions before placing new trades
+2. Load performance data from `performance.json` (if exists)
+3. Select top 6 performing symbols by profit_factor, or use all 11 if no data
+4. Load models for selected symbols from `saved_models/`
+5. Subscribe to live price feeds for selected symbol pairs
+6. Accumulate tick data in buffers (needs 50+ ticks before trading)
+7. Compute features and get predictions from ALL models
+8. Calculate combined confidence: `opp × dir` (long) or `opp × (1-dir)` (short)
+9. Execute trades where combined confidence > threshold
+10. Check for existing positions before placing new trades
 
 ### Trading Parameters (in main.py)
 ```python
@@ -152,7 +154,7 @@ SL_PIPS = 10                   # Stop loss in pips
 TP_PIPS = 20                   # Take profit in pips (2:1 reward:risk)
 
 # Lot Sizing
-BASE_LOT_SIZE = 100.0          # Base lot size for all trades
+FIXED_LOT_SIZE = 100.0          # Fixed lot for all trades
 CASH_BUFFER_PERCENT = 0.20     # Reserve 20% of equity as cash buffer (never trade with)
 MIN_EQUITY_THRESHOLD = 10000   # Minimum equity required to trade
 
@@ -176,6 +178,9 @@ MAX_RECONNECT_RETRIES = 5      # Max reconnection attempts
 # Margin Call Handling
 MARGIN_RECOVERY_WAIT = 60      # Seconds to wait between recovery checks
 MARGIN_MAX_WAIT = 600          # Max wait time (10 minutes) before exit
+
+# Symbol Selection
+TOP_N_SYMBOLS = 6             # Use top 6 performing symbols from backtest
 ```
 
 ### Bot Reliability Features
@@ -197,47 +202,13 @@ The bot includes comprehensive margin call prevention and risk management:
 | **Margin Usage Check** | Skip new trades if margin usage > 50% |
 | **Correlation Filter** | Avoids same-direction trades on correlated pairs |
 
-#### Connection & Recovery
-| Feature | Description |
-|---------|-------------|
-| **API Timeout** | 5 second timeout on all cTrader API calls |
-| **Connection Check** | Validates connection before each trading cycle |
-| **Exponential Backoff** | Reconnect wait time: 2^attempt + random jitter |
-| **Max Retries** | 5 attempts before exiting gracefully |
-| **Margin Call Detection** | Monitors position state for margin calls |
-| **Auto-Resume** | Automatically resumes trading after margin recovery |
-
-#### Connection & Recovery
-| Feature | Description |
-|---------|-------------|
-| **API Timeout** | 5 second timeout on all cTrader API calls |
-| **Connection Check** | Validates connection before each trading cycle |
-| **Exponential Backoff** | Reconnect wait time: 2^attempt + random jitter |
-| **Max Retries** | 5 attempts before exiting gracefully |
-| **Margin Call Detection** | Monitors position state for margin calls |
-| **Auto-Resume** | Automatically resumes trading after margin recovery |
-
-**Margin Call Handling Flow:**
-1. Detect margin call state from position data
-2. Close all open positions immediately
-3. Wait for margin recovery (60 second intervals)
-4. Resume trading after recovery (clears tick buffers)
-5. Exit after 10 minutes if unrecovered
-
-Example reconnection sequence:
-- Attempt 1: wait ~2s
-- Attempt 2: wait ~4s
-- Attempt 3: wait ~8s
-- Attempt 4: wait ~16s
-- Attempt 5: wait ~32s
-
-If all retries fail, the bot logs the failure and exits cleanly rather than hanging.
-
 ### Bot Workflow
 
-1. **Initialization**: Connect to cTrader, subscribe to symbols, load models, get initial equity
-2. **Warm-up**: Wait for 50 ticks per symbol to accumulate in buffers (~12+ minutes)
-3. **Trading Loop** (every 15 seconds):
+1. **Initialization**: Connect to cTrader, load performance.json, select top 6 symbols by profit_factor
+2. **Subscribe**: Subscribe to price feeds for selected symbols only
+3. **Load Models**: Load XGBoost models for selected symbols
+4. **Warm-up**: Wait for 50 ticks per symbol to accumulate in buffers (~12+ minutes)
+5. **Trading Loop** (every 15 seconds):
    - Check connection health
    - Check for margin call state
      - If margin call: close positions, wait for recovery, auto-resume
@@ -253,17 +224,18 @@ If all retries fail, the bot logs the failure and exits cleanly rather than hang
      - Check thresholds
      - Check max positions (max 4)
      - Check correlation filter
-   - Execute trades with dynamic lot sizing (scales with equity)
+   - Execute trades with fixed lot sizing
 
-### Lot Size
+### Symbol Selection
 
-The bot uses a fixed lot size for all trades (configured via `FIXED_LOT_SIZE`).
+The bot now supports **dynamic symbol selection** based on backtest performance:
 
-```python
-FIXED_LOT_SIZE = 100.0  # Fixed lot for all trades
-```
+- After running `python backtest.py`, performance data is saved to `performance.json`
+- On startup, `main.py` loads this file and sorts symbols by `profit_factor`
+- Selects the top 6 performing symbols for live trading
+- Falls back to all 11 symbols if no performance data exists
 
-This simplifies position sizing - no need to calculate based on account balance or risk percentage.
+This allows the bot to focus on historically best-performing pairs while maintaining diversity.
 
 ## Model Features (25 features)
 
@@ -382,6 +354,11 @@ AlphaMind/
 
 **Price precision errors**
 - SL/TP prices now rounded to correct decimal places (5 for most pairs, 3 for JPY)
+
+**KeyError: 'nzdusd' or similar symbol errors**
+- Ensure `data/performance.json` is generated by running `python backtest.py` first
+- The bot now gracefully handles symbols not in tick_buffers by checking existence first
+- Falls back to all 11 symbols if performance data is not available
 
 ### Margin Call Handling
 
