@@ -1,5 +1,5 @@
-import glob
 import gc
+import glob
 import json
 import os
 import random
@@ -406,14 +406,13 @@ def update_tick_buffer(symbol, bid, ask):
         if val.upper() == symbol.upper():
             buffer_key = key
             break
-    
+
     if buffer_key is None:
         buffer_key = symbol.lower()
-    
+
     if buffer_key not in tick_buffers:
-        log(f"DEBUG: Buffer key '{buffer_key}' not found in tick_buffers")
         return
-    
+
     mid = (bid + ask) / 2
     tick_buffers[buffer_key].append(
         {
@@ -552,13 +551,17 @@ def place_trade(direction, symbol, lot, sl_pips, tp_pips):
         if direction == "BUY":
             sl = round(bid - (sl_pips * pip_val), digits)
             tp = round(bid + (tp_pips * pip_val), digits)
-            api.buy(ctrader_symbol, lot, sl, tp)
-            log(f"Trade BUY {ctrader_symbol} | Lot: {lot} | SL: {sl} | TP: {tp}")
+            result = safe_api_call(api.buy, ctrader_symbol, lot, sl, tp)
+            log(
+                f"Trade BUY {ctrader_symbol} | Lot: {lot} | SL: {sl} | TP: {tp} | Result: {result}"
+            )
         else:
             sl = round(ask + (sl_pips * pip_val), digits)
             tp = round(ask - (tp_pips * pip_val), digits)
-            api.sell(ctrader_symbol, lot, sl, tp)
-            log(f"Trade SELL {ctrader_symbol} | Lot: {lot} | SL: {sl} | TP: {tp}")
+            result = safe_api_call(api.sell, ctrader_symbol, lot, sl, tp)
+            log(
+                f"Trade SELL {ctrader_symbol} | Lot: {lot} | SL: {sl} | TP: {tp} | Result: {result}"
+            )
 
         return True
 
