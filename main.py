@@ -57,9 +57,11 @@ def get_active_symbols(performance_file="saved_models/performance.json", top_n=6
             reverse=True
         )
         
-        top_symbols = dict(sorted_symbols[:top_n])
+        top_dict = {}
+        for symbol, _ in sorted_symbols[:top_n]:
+            top_dict[symbol] = SYMBOL_MAP.get(symbol, symbol.upper())
         
-        return top_symbols
+        return top_dict
     except Exception as e:
         return SYMBOL_MAP
 
@@ -318,10 +320,13 @@ def has_correlated_position(symbol, direction):
 
 def load_all_models():
     models = {}
+    active = set(ACTIVE_SYMBOLS.keys())
     model_files = glob.glob("saved_models/*_xgb_model.pkl")
 
     for f in model_files:
         symbol = os.path.basename(f).replace("_xgb_model.pkl", "")
+        if symbol not in active:
+            continue
         try:
             data = joblib.load(f)
             models[symbol] = {
@@ -369,6 +374,7 @@ def get_latest_prices():
     for symbol in ACTIVE_SYMBOLS.values():
         try:
             q = safe_api_call(api.quote, symbol)
+            log(f"Quote for {symbol}: {q}")
             if q:
                 if "bid" in q and "ask" in q:
                     prices[symbol] = q
