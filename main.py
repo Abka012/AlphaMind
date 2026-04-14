@@ -48,19 +48,17 @@ def get_active_symbols(performance_file="saved_models/performance.json", top_n=6
     Falls back to all symbols if file not found.
     """
     try:
-        with open(performance_file, 'r') as f:
+        with open(performance_file, "r") as f:
             results = json.load(f)
-        
+
         sorted_symbols = sorted(
-            results.items(),
-            key=lambda x: x[1].get('profit_factor', 0),
-            reverse=True
+            results.items(), key=lambda x: x[1].get("profit_factor", 0), reverse=True
         )
-        
+
         top_dict = {}
         for symbol, _ in sorted_symbols[:top_n]:
             top_dict[symbol] = SYMBOL_MAP.get(symbol, symbol.upper())
-        
+
         return top_dict
     except Exception as e:
         return SYMBOL_MAP
@@ -374,7 +372,6 @@ def get_latest_prices():
     for symbol in ACTIVE_SYMBOLS.values():
         try:
             q = safe_api_call(api.quote, symbol)
-            log(f"Quote for {symbol}: {q}")
             if q:
                 if "bid" in q and "ask" in q:
                     prices[symbol] = q
@@ -402,11 +399,22 @@ def get_latest_prices():
 
 
 def update_tick_buffer(symbol, bid, ask):
-    if symbol not in tick_buffers:
+    # Find the correct key in tick_buffers (could be 'nzusd' vs 'nzdusd')
+    buffer_key = None
+    for key, val in ACTIVE_SYMBOLS.items():
+        if val.upper() == symbol.upper():
+            buffer_key = key
+            break
+    
+    if buffer_key is None:
+        buffer_key = symbol.lower()
+    
+    if buffer_key not in tick_buffers:
+        log(f"DEBUG: Buffer key '{buffer_key}' not found in tick_buffers")
         return
-    ctrader_symbol = ACTIVE_SYMBOLS.get(symbol, symbol.upper())
+    
     mid = (bid + ask) / 2
-    tick_buffers[symbol].append(
+    tick_buffers[buffer_key].append(
         {
             "timestamp": pd.Timestamp.now(),
             "close": mid,
@@ -693,7 +701,7 @@ def main():
             cycle_count += 1
             if cycle_count % 10 == 0:
                 log_memory_usage()
-            
+
             try:
                 if not check_connection():
                     log("Connection lost, attempting reconnect...")
