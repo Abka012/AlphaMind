@@ -1,5 +1,5 @@
 #!/bin/bash
-# cleanup.sh - Delete old data and models for HFT bot
+# cleanup.sh - Delete old data and models for MFT bot
 
 echo "🧹 Cleaning up old data and models..."
 echo ""
@@ -9,7 +9,7 @@ if [ -d "saved_models" ]; then
     rm -f saved_models/*.pkl
     echo "✓ Deleted saved_models/*.pkl"
 else
-    echo "⚠ saved_models/ not found"
+    echo "⚠ saved_models/*.pkl not found"
 fi
 
 # Delete CSV files in data/raw_ticks
@@ -18,6 +18,14 @@ if [ -d "data/raw_ticks" ]; then
     echo "✓ Deleted data/raw_ticks/*.csv"
 else
     echo "⚠ data/raw_ticks not found"
+fi
+
+# Delete Json log in saved_models
+if [ -d "saved_models" ]; then
+    rm -f saved_models/*.json
+    echo "✓ Deleted saved_models/*.json"
+else
+    echo "⚠ saved_models/*.json not found"
 fi
 
 echo ""
