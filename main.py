@@ -1,4 +1,5 @@
 import glob
+import gc
 import json
 import os
 import random
@@ -700,6 +701,7 @@ def main():
         while True:
             cycle_count += 1
             if cycle_count % 10 == 0:
+                gc.collect()
                 log_memory_usage()
 
             try:
