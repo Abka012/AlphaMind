@@ -28,10 +28,11 @@ COMBINED_CONF_THRESHOLD = 0.40
 
 
 def calculate_combined_confidence(opp_pred, dir_pred):
-    if dir_pred > 0.5:
-        return opp_pred * dir_pred
-    else:
-        return opp_pred * (1 - dir_pred)
+    return np.where(
+        dir_pred > 0.5,
+        opp_pred * dir_pred,
+        opp_pred * (1 - dir_pred)
+    )
 
 
 def run_backtest(symbol):
