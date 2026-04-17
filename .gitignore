@@ -32,3 +32,4 @@ saved_models/*.json
 
 # Agent config
 AGENTS.md
+docs/agent-sessions/
