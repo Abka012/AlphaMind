@@ -329,24 +329,23 @@ def has_correlated_position(symbol, direction):
 def load_all_models():
     models = {}
     active = set(ACTIVE_SYMBOLS.keys())
-    model_files = glob.glob("saved_models/*_xgb_model.pkl")
+    model_files = glob.glob("saved_models/*_xgb_ensemble_model.pkl")
 
     for f in model_files:
-        symbol = os.path.basename(f).replace("_xgb_model.pkl", "")
+        symbol = os.path.basename(f).replace("_xgb_ensemble_model.pkl", "")
         if symbol not in active:
             continue
         try:
             data = joblib.load(f)
             models[symbol] = {
-                "model_opp": data["model_opp"],
-                "model_dir": data["model_dir"],
+                "ensemble_models": data["models"],
                 "scaler": data["scaler"],
                 "features": data["features"],
-                "horizon": data.get("horizon", 1000),
+                "horizons": data["horizons"],
             }
-            print(f"Loaded model: {symbol.upper()}")
+            print(f"Loaded Ensemble model: {symbol.upper()}")
         except Exception as e:
-            print(f"Failed to load model {symbol}: {e}")
+            print(f"Failed to load ensemble model {symbol}: {e}")
 
     return models
 
@@ -518,22 +517,32 @@ def compute_live_features(symbol):
     # Micro-structure features for HFT
     tick_dir = np.sign(df["close"].diff())
     tick_dir = tick_dir.replace(0, np.nan).ffill().fillna(0)
-    features["tick_direction_imbalance"] = tick_dir.rolling(window=20, min_periods=1).mean().iloc[-1]
+    features["tick_direction_imbalance"] = (
+        tick_dir.rolling(window=20, min_periods=1).mean().iloc[-1]
+    )
 
     spread_ma = df["tick_spread"].rolling(window=20, min_periods=1).mean().iloc[-1]
-    features["spread_compression"] = 1 if df["tick_spread"].iloc[-1] < spread_ma * 0.5 else 0
+    features["spread_compression"] = (
+        1 if df["tick_spread"].iloc[-1] < spread_ma * 0.5 else 0
+    )
 
     features["tick_acceleration"] = df["close"].diff().diff().iloc[-1]
 
     vwap = (df["close"] * df["tick_volume"]).rolling(window=50, min_periods=1).sum() / (
         df["tick_volume"].rolling(window=50, min_periods=1).sum() + 1e-9
     )
-    features["vwap_deviation"] = (df["close"].iloc[-1] - vwap.iloc[-1]) / (features["tick_std"] + 1e-9)
+    features["vwap_deviation"] = (df["close"].iloc[-1] - vwap.iloc[-1]) / (
+        features["tick_std"] + 1e-9
+    )
 
     features["volume_weighted_imbalance"] = 0
 
-    features["consecutive_bid"] = sum(1 for i in range(-5, 0) if df["close"].diff().iloc[i] > 0)
-    features["consecutive_ask"] = sum(1 for i in range(-5, 0) if df["close"].diff().iloc[i] < 0)
+    features["consecutive_bid"] = sum(
+        1 for i in range(-5, 0) if df["close"].diff().iloc[i] > 0
+    )
+    features["consecutive_ask"] = sum(
+        1 for i in range(-5, 0) if df["close"].diff().iloc[i] < 0
+    )
 
     return features
 
@@ -836,46 +845,53 @@ def main():
 
                     scaler = model_data["scaler"]
                     feature_names = model_data["features"]
-                    model_opp = model_data["model_opp"]
-                    model_dir = model_data["model_dir"]
+                    ensemble_models = model_data["ensemble_models"]
+                    horizons = model_data["horizons"]
 
                     X = np.array([[features.get(f, 0) for f in feature_names]])
                     X = scaler.transform(X)
 
-                    opp_pred = model_opp.predict_proba(X)[0, 1]
-                    dir_pred = model_dir.predict_proba(X)[0, 1]
+                    opp_preds = []
+                    dir_preds = []
 
-                    combined_conf = calculate_combined_confidence(opp_pred, dir_pred)
+                    for h in horizons:
+                        m_opp = ensemble_models[h]["model_opp"]
+                        m_dir = ensemble_models[h]["model_dir"]
+                        opp_preds.append(m_opp.predict_proba(X)[0, 1])
+                        dir_preds.append(m_dir.predict_proba(X)[0, 1])
 
-                    meets_thresh = (
-                        "YES"
-                        if (
-                            opp_pred > OPP_THRESHOLD
-                            and (
-                                dir_pred > DIR_LONG_THRESHOLD
-                                or dir_pred < DIR_SHORT_THRESHOLD
-                            )
-                            and combined_conf > COMBINED_CONF_THRESHOLD
-                        )
-                        else "NO"
-                    )
+                    avg_opp = np.mean(opp_preds)
+                    avg_dir = np.mean(dir_preds)
+
+                    # Consensus logic
+                    all_long = all(d > 0.5 for d in dir_preds)
+                    all_short = all(d < 0.5 for d in dir_preds)
+
+                    # Volatility regime from features
+                    vol_regime = features.get("tick_vol_regime", 0)
+
+                    combined_conf = calculate_combined_confidence(avg_opp, avg_dir)
+
+                    # Higher thresholds for live trading (from backtest refinement)
+                    meets_thresh = "NO"
+                    if (
+                        (all_long or all_short)
+                        and avg_opp > 0.70
+                        and combined_conf > 0.40
+                        and vol_regime == 1
+                    ):
+                        meets_thresh = "YES"
+
                     log(
-                        f"{symbol.upper()}: opp={opp_pred:.2f}, dir={dir_pred:.2f}, combined={combined_conf:.2f} -> {meets_thresh}"
+                        f"{symbol.upper()}: avg_opp={avg_opp:.2f}, avg_dir={avg_dir:.2f}, combined={combined_conf:.2f}, vol={vol_regime} -> {meets_thresh}"
                     )
 
                     if meets_thresh == "YES":
-                        # Determine signal direction first for correlation check
-                        if dir_pred > DIR_LONG_THRESHOLD:
-                            current_signal_type = "LONG"
-                        elif dir_pred < DIR_SHORT_THRESHOLD:
-                            current_signal_type = "SHORT"
-                        else:
-                            current_signal_type = None
+                        # Determine signal direction
+                        current_signal_type = "LONG" if all_long else "SHORT"
 
-                        # Check correlation with current direction
-                        if current_signal_type and has_correlated_position(
-                            symbol, current_signal_type
-                        ):
+                        # Check correlation
+                        if has_correlated_position(symbol, current_signal_type):
                             log(f"Correlated position exists for {symbol}, skipping")
 
                         # Check max concurrent positions
@@ -884,18 +900,10 @@ def main():
                                 f"Max positions ({MAX_CONCURRENT_POSITIONS}) reached for {symbol}, skipping"
                             )
 
-                        # Add to signals if passing all checks
-                        elif opp_pred > OPP_THRESHOLD:
-                            if dir_pred > DIR_LONG_THRESHOLD:
-                                signal_type = "LONG"
-                                signals.append(
-                                    (symbol, combined_conf, signal_type, dir_pred)
-                                )
-                            elif dir_pred < DIR_SHORT_THRESHOLD:
-                                signal_type = "SHORT"
-                                signals.append(
-                                    (symbol, combined_conf, signal_type, dir_pred)
-                                )
+                        else:
+                            signals.append(
+                                (symbol, combined_conf, current_signal_type, avg_dir)
+                            )
 
                 trade_signals = [s for s in signals if s[1] > COMBINED_CONF_THRESHOLD]
                 trade_signals.sort(key=lambda x: x[1], reverse=True)

@@ -7,12 +7,24 @@ import xgboost as xgb
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
-SYMBOLS = ["eurusd", "gbpusd", "usdjpy", "audusd", "usdcad", "usdchf", "nzusd", "eurjpy", "gbpjpy", "audjpy", "eurgbp"]
-HORIZON = 200  # ticks ahead (~1-5 min)
+SYMBOLS = [
+    "eurusd",
+    "gbpusd",
+    "usdjpy",
+    "audusd",
+    "usdcad",
+    "usdchf",
+    "nzusd",
+    "eurjpy",
+    "gbpjpy",
+    "audjpy",
+    "eurgbp",
+]
+HORIZONS = [50, 100, 200]
 
 
-def print_target_stats(y1, y2):
-    print("\nTarget Statistics:")
+def print_target_stats(horizon, y1, y2):
+    print(f"\nTarget Statistics (Horizon {horizon}):")
     print(
         f"  Opportunity - Mean: {y1.mean():.3f}, Std: {y1.std():.3f}, Sum: {y1.sum():.0f}"
     )
@@ -38,11 +50,8 @@ def train_symbol(symbol):
     df = filter_data(df)
     print(f"After filter_data: {len(df):,}")
 
-    df = add_targets(df, horizon=HORIZON)
+    df = add_targets(df, horizons=HORIZONS)
     print(f"After add_targets: {len(df):,}")
-
-    df = df.dropna(subset=["target_opportunity", "target_direction"])
-    print(f"After dropna: {len(df):,}")
 
     # Sample for faster training
     if len(df) > MAX_SAMPLES:
@@ -96,115 +105,101 @@ def train_symbol(symbol):
     scaler = StandardScaler()
     X = scaler.fit_transform(df[features])
 
-    y_opp = df["target_opportunity"].values
-    y_dir = df["target_direction"].values
+    models = {}
+    summary = {}
 
-    split = int(len(X) * 0.8)
+    for horizon in HORIZONS:
+        print(f"\n{'-' * 30}")
+        print(f"Training for Horizon: {horizon}")
+        print(f"{'-' * 30}")
 
-    X_train, X_test = X[:split], X[split:]
-    y_opp_train, y_opp_test = y_opp[:split], y_opp[split:]
-    y_dir_train, y_dir_test = y_dir[:split], y_dir[split:]
+        y_opp = df[f"target_opportunity_{horizon}"].values
+        y_dir = df[f"target_direction_{horizon}"].values
 
-    print(f"\nTrain size: {len(X_train):,}, Test size: {len(X_test):,}")
-    print_target_stats(y_opp_train, y_dir_train)
+        split = int(len(X) * 0.8)
 
-    # Train Opportunity model
-    print("\n" + "=" * 50)
-    print("Training XGBoost for Opportunity...")
-    print("=" * 50)
+        X_train, X_test = X[:split], X[split:]
+        y_opp_train, y_opp_test = y_opp[:split], y_opp[split:]
+        y_dir_train, y_dir_test = y_dir[:split], y_dir[split:]
 
-    pos_weight_opp = (len(y_opp_train) - y_opp_train.sum()) / (y_opp_train.sum() + 1)
-    model_opp = xgb.XGBClassifier(
-        n_estimators=200,
-        max_depth=6,
-        learning_rate=0.03,
-        min_child_weight=10,
-        gamma=1.0,
-        reg_alpha=1.0,
-        reg_lambda=3,
-        scale_pos_weight=pos_weight_opp,
-        objective="binary:logistic",
-        eval_metric="logloss",
-        n_jobs=-1,
-    )
+        print(f"\nTrain size: {len(X_train):,}, Test size: {len(X_test):,}")
+        print_target_stats(horizon, y_opp_train, y_dir_train)
 
-    with tqdm(total=1, desc=f"{symbol.upper()} Opportunity", leave=False) as pbar:
+        # Train Opportunity model
+        print(f"\nTraining XGBoost for Opportunity (H{horizon})...")
+        pos_weight_opp = (len(y_opp_train) - y_opp_train.sum()) / (
+            y_opp_train.sum() + 1
+        )
+        model_opp = xgb.XGBClassifier(
+            n_estimators=100,  # Reduced for faster ensemble training
+            max_depth=6,
+            learning_rate=0.03,
+            min_child_weight=10,
+            gamma=1.0,
+            reg_alpha=1.0,
+            reg_lambda=3,
+            scale_pos_weight=pos_weight_opp,
+            objective="binary:logistic",
+            eval_metric="logloss",
+            n_jobs=-1,
+        )
+
         model_opp.fit(
             X_train, y_opp_train, eval_set=[(X_test, y_opp_test)], verbose=False
         )
-        pbar.update(1)
 
-    opp_train_pred = model_opp.predict_proba(X_train)[:, 1]
-    opp_train_acc = ((opp_train_pred > 0.5) == y_opp_train).mean()
-    opp_test_pred = model_opp.predict_proba(X_test)[:, 1]
-    opp_test_acc = ((opp_test_pred > 0.5) == y_opp_test).mean()
+        opp_test_pred = model_opp.predict_proba(X_test)[:, 1]
+        opp_test_acc = ((opp_test_pred > 0.5) == y_opp_test).mean()
 
-    print(f"Opportunity Train Accuracy: {opp_train_acc:.3f}")
-    print(f"Opportunity Test Accuracy: {opp_test_acc:.3f}")
+        # Train Direction model
+        print(f"Training XGBoost for Direction (H{horizon})...")
+        pos_weight_dir = (len(y_dir_train) - y_dir_train.sum()) / (
+            y_dir_train.sum() + 1
+        )
+        model_dir = xgb.XGBClassifier(
+            n_estimators=100,
+            max_depth=6,
+            learning_rate=0.03,
+            min_child_weight=10,
+            gamma=1.0,
+            reg_alpha=1.0,
+            reg_lambda=3,
+            scale_pos_weight=pos_weight_dir,
+            objective="binary:logistic",
+            eval_metric="logloss",
+            n_jobs=-1,
+        )
 
-    # Train Direction model (classification for better signal)
-    print("\n" + "=" * 50)
-    print("Training XGBoost for Direction...")
-    print("=" * 50)
-
-    pos_weight_dir = (len(y_dir_train) - y_dir_train.sum()) / (y_dir_train.sum() + 1)
-    model_dir = xgb.XGBClassifier(
-        n_estimators=200,
-        max_depth=6,
-        learning_rate=0.03,
-        min_child_weight=10,
-        gamma=1.0,
-        reg_alpha=1.0,
-        reg_lambda=3,
-        scale_pos_weight=pos_weight_dir,
-        objective="binary:logistic",
-        eval_metric="logloss",
-        n_jobs=-1,
-    )
-
-    with tqdm(total=1, desc=f"{symbol.upper()} Direction", leave=False) as pbar:
         model_dir.fit(
             X_train, y_dir_train, eval_set=[(X_test, y_dir_test)], verbose=False
         )
-        pbar.update(1)
 
-    dir_train_pred = model_dir.predict_proba(X_train)[:, 1]
-    dir_test_pred = model_dir.predict_proba(X_test)[:, 1]
+        dir_test_pred = model_dir.predict_proba(X_test)[:, 1]
+        dir_test_acc = ((dir_test_pred > 0.5) == y_dir_test).mean()
 
-    dir_train_acc = ((dir_train_pred > 0.5) == y_dir_train).mean()
-    dir_test_acc = ((dir_test_pred > 0.5) == y_dir_test).mean()
+        print(f"H{horizon} Opportunity Acc: {opp_test_acc:.3f}")
+        print(f"H{horizon} Direction Acc: {dir_test_acc:.3f}")
 
-    print(f"Direction Train Accuracy: {dir_train_acc:.3f}")
-    print(f"Direction Test Accuracy: {dir_test_acc:.3f}")
-
-    print("\n--- Feature Importance (Direction) ---")
-    importance = model_dir.feature_importances_
-    feat_imp = sorted(zip(features, importance), key=lambda x: x[1], reverse=True)
-    for feat, imp in feat_imp[:10]:
-        print(f"  {feat}: {imp:.3f}")
+        models[horizon] = {"model_opp": model_opp, "model_dir": model_dir}
+        summary[horizon] = {"opp_acc": opp_test_acc, "dir_acc": dir_test_acc}
 
     os.makedirs("saved_models", exist_ok=True)
 
     joblib.dump(
         {
-            "model_opp": model_opp,
-            "model_dir": model_dir,
+            "models": models,
             "scaler": scaler,
             "features": features,
-            "horizon": HORIZON,
+            "horizons": HORIZONS,
         },
-        f"saved_models/{symbol}_xgb_model.pkl",
+        f"saved_models/{symbol}_xgb_ensemble_model.pkl",
     )
 
     print(f"\n{'=' * 50}")
-    print(f"✅ {symbol.upper()} XGBoost model saved!")
+    print(f"✅ {symbol.upper()} XGBoost Ensemble model saved!")
     print(f"{'=' * 50}")
 
-    return {
-        "symbol": symbol,
-        "opp_test_acc": opp_test_acc,
-        "dir_test_acc": dir_test_acc,
-    }
+    return {"symbol": symbol, "summary": summary}
 
 
 MAX_SAMPLES = 500000  # Limit samples for faster training
@@ -212,14 +207,17 @@ MAX_SAMPLES = 500000  # Limit samples for faster training
 
 if __name__ == "__main__":
     print(f"\n{'#' * 50}")
-    print(f"# Training models for {len(SYMBOLS)} currency pairs")
-    print(f"# Horizon: {HORIZON} ticks")
+    print(f"# Training Ensemble models for {len(SYMBOLS)} currency pairs")
+    print(f"# Horizons: {HORIZONS} ticks")
     print(f"# Max samples per symbol: {MAX_SAMPLES:,}")
     print(f"{'#' * 50}")
 
     results = []
-    for idx, symbol in enumerate(SYMBOLS):
-        print(f"\n[{(idx + 1)}/{len(SYMBOLS)}] Processing {symbol.upper()}...")
+    # User requested to focus on EURUSD first
+    target_symbols = ["eurusd"]
+
+    for idx, symbol in enumerate(target_symbols):
+        print(f"\n[{(idx + 1)}/{len(target_symbols)}] Processing {symbol.upper()}...")
 
         if not os.path.exists(f"data/raw_ticks/{symbol}.csv"):
             print(f"  ⚠ Data file not found: data/raw_ticks/{symbol}.csv")
@@ -236,8 +234,9 @@ if __name__ == "__main__":
     print("TRAINING SUMMARY")
     print("=" * 50)
     for r in results:
-        print(
-            f"  {r['symbol'].upper()}: Opp={r['opp_test_acc']:.3f}, Dir={r['dir_test_acc']:.3f}"
-        )
+        msg = f"  {r['symbol'].upper()}: "
+        for h, stats in r["summary"].items():
+            msg += f"H{h}(Opp={stats['opp_acc']:.3f}, Dir={stats['dir_acc']:.3f}) "
+        print(msg)
     print("=" * 50)
     print(f"✅ All models trained and saved to saved_models/")

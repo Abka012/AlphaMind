@@ -32,22 +32,21 @@ def calculate_combined_confidence(opp_pred, dir_pred):
 
 
 def run_backtest(symbol):
-    """Run backtest for a single symbol."""
-    model_path = f"saved_models/{symbol}_xgb_model.pkl"
+    """Run backtest for a single symbol using Ensemble of Horizons."""
+    model_path = f"saved_models/{symbol}_xgb_ensemble_model.pkl"
 
     if not os.path.exists(model_path):
         return None
 
     print(f"\n{'=' * 50}")
-    print(f"Loading model for {symbol.upper()}...")
+    print(f"Loading Ensemble model for {symbol.upper()}...")
     print(f"{'=' * 50}")
 
     xgb_data = joblib.load(model_path)
-    model_opp = xgb_data["model_opp"]
-    model_dir = xgb_data["model_dir"]
+    ensemble_models = xgb_data["models"]
     scaler = xgb_data["scaler"]
     features = xgb_data["features"]
-    trained_horizon = xgb_data.get("horizon", HORIZON)
+    horizons = xgb_data["horizons"]
 
     from indicators import add_features, filter_data, standardize_df
 
@@ -63,20 +62,45 @@ def run_backtest(symbol):
     df = df.dropna(subset=features)
     print(f"After dropna: {len(df):,}")
 
-    print("\nMaking predictions...")
+    print("\nMaking predictions for all horizons...")
     X = scaler.transform(df[features])
 
-    opp_pred = model_opp.predict_proba(X)[:, 1]
-    dir_pred = model_dir.predict_proba(X)[:, 1]
+    opp_preds = {}
+    dir_preds = {}
 
-    print(f"Predictions complete: {len(opp_pred):,} samples")
+    for h in horizons:
+        print(f"  Predicting for H{h}...")
+        model_opp = ensemble_models[h]["model_opp"]
+        model_dir = ensemble_models[h]["model_dir"]
+        opp_preds[h] = model_opp.predict_proba(X)[:, 1]
+        dir_preds[h] = model_dir.predict_proba(X)[:, 1]
 
-    # Backtest parameters - wider RR for mean reversion
+    print(f"Predictions complete: {len(X):,} samples")
+
+    # Consensus Logic:
+    # 1. All horizons must agree on direction
+    # 2. Average direction confidence must be strong
+    # 3. Average opportunity must be above threshold
+
+    dir_consensus_long = np.ones(len(X), dtype=bool)
+    dir_consensus_short = np.ones(len(X), dtype=bool)
+    avg_opp = np.zeros(len(X))
+    avg_dir = np.zeros(len(X))
+
+    for h in horizons:
+        dir_consensus_long &= dir_preds[h] > 0.5
+        dir_consensus_short &= dir_preds[h] < 0.5
+        avg_opp += opp_preds[h]
+        avg_dir += dir_preds[h]
+
+    avg_opp /= len(horizons)
+    avg_dir /= len(horizons)
+
+    # Backtest parameters
     sl_pips = 10
     tp_pips = 30
     cost = 0.00005
 
-    # Get pip value: 0.01 for JPY pairs, 0.0001 for others
     def get_pip_value(sym):
         jpy_pairs = [
             "usdjpy",
@@ -91,24 +115,34 @@ def run_backtest(symbol):
 
     pip_value = get_pip_value(symbol)
 
-    # Calculate combined confidence
-    combined_conf = calculate_combined_confidence(opp_pred, dir_pred)
+    # Combined confidence for the ensemble
+    combined_conf = np.where(avg_dir > 0.5, avg_opp * avg_dir, avg_opp * (1 - avg_dir))
 
-    # Apply thresholds - momentum only
-    trade_mask = opp_pred > OPP_THRESHOLD
-    positions = np.zeros(len(dir_pred))
+    # Regime Filter: Volatility > average
+    # tick_vol_regime: 1 if tick_std > tick_std_ma_200
+    # Let's get it from the dataframe if available or compute it here
+    vol_regime = df["tick_vol_regime"].values
+
+    positions = np.zeros(len(avg_dir))
+
+    # Selective thresholds for consensus + Volatility Regime filter
+    # Increasing thresholds for higher quality
     positions[
-        trade_mask
-        & (dir_pred > DIR_LONG_THRESHOLD)
-        & (combined_conf > COMBINED_CONF_THRESHOLD)
+        dir_consensus_long
+        & (avg_opp > 0.70)
+        & (combined_conf > 0.40)
+        & (vol_regime == 1)  # Only trade in high volatility
     ] = 1
+
     positions[
-        trade_mask
-        & (dir_pred < DIR_SHORT_THRESHOLD)
-        & (combined_conf > COMBINED_CONF_THRESHOLD)
+        dir_consensus_short
+        & (avg_opp > 0.70)
+        & (combined_conf > 0.40)
+        & (vol_regime == 1)
     ] = -1
 
     close_prices = df["close"].values
+    trained_horizon = max(horizons)  # Use max horizon for exit if not hit SL/TP
 
     trade_indices = np.where(positions != 0)[0]
     valid_indices = trade_indices[trade_indices + trained_horizon < len(close_prices)]
@@ -116,7 +150,15 @@ def run_backtest(symbol):
 
     if len(valid_indices) == 0:
         print("No trades to analyze!")
-        return {"symbol": symbol, "trades": 0, "win_rate": 0, "profit_factor": 0, "sharpe": 0, "max_drawdown": 0, "total_return": 0}
+        return {
+            "symbol": symbol,
+            "trades": 0,
+            "win_rate": 0,
+            "profit_factor": 0,
+            "sharpe": 0,
+            "max_drawdown": 0,
+            "total_return": 0,
+        }
 
     returns = []
 
@@ -165,7 +207,11 @@ def run_backtest(symbol):
     # Annualize: using sqrt of number of trades for more realistic Sharpe
     # Each trade represents ~50 ticks (horizon), not 1 second
     n_periods_per_day = len(returns) / (HORIZON * 60)  # rough estimate
-    sharpe = np.mean(returns) / (np.std(returns) + 1e-9) * np.sqrt(n_periods_per_day * 252) if n_periods_per_day > 0 else 0
+    sharpe = (
+        np.mean(returns) / (np.std(returns) + 1e-9) * np.sqrt(n_periods_per_day * 252)
+        if n_periods_per_day > 0
+        else 0
+    )
     win_rate = len(wins) / len(returns) if len(returns) > 0 else 0
     max_drawdown = 1 - (equity / np.maximum.accumulate(equity)).min()
 
