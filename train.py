@@ -8,7 +8,7 @@ from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
 SYMBOLS = ["eurusd", "gbpusd", "usdjpy", "audusd", "usdcad", "usdchf", "nzusd", "eurjpy", "gbpjpy", "audjpy", "eurgbp"]
-HORIZON = 50  # ticks ahead for HFT
+HORIZON = 200  # ticks ahead (~1-5 min)
 
 
 def print_target_stats(y1, y2):

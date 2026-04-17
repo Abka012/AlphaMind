@@ -18,13 +18,13 @@ SYMBOLS = [
     "audjpy",
     "eurgbp",
 ]
-HORIZON = 50  # ticks ahead for HFT
+HORIZON = 200  # ticks ahead (~1-5 min)
 
-# Thresholds - balanced for more trades
-OPP_THRESHOLD = 0.55
-DIR_LONG_THRESHOLD = 0.52
-DIR_SHORT_THRESHOLD = 0.48
-COMBINED_CONF_THRESHOLD = 0.30
+# Thresholds - selective for quality
+OPP_THRESHOLD = 0.70
+DIR_LONG_THRESHOLD = 0.55
+DIR_SHORT_THRESHOLD = 0.45
+COMBINED_CONF_THRESHOLD = 0.35
 
 
 def calculate_combined_confidence(opp_pred, dir_pred):

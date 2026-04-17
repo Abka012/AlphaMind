@@ -14,8 +14,8 @@ The model has been optimized for high-frequency trading with the following impro
 
 | Parameter | Original | HFT |
 |-----------|----------|-----|
-| Horizon | 1000 ticks | 50 ticks (~10-30 sec) |
-| SL/TP | 10/20 pips | 5/10 pips |
+| Horizon | 1000 ticks | 200 ticks (~1-5 min) |
+| SL/TP | 10/20 pips | 10/20 pips |
 | Check Interval | 15 sec | 3 sec |
 | Features | 25 | 34 (+micro-structure) |
 
@@ -151,17 +151,17 @@ python backtest.py
 This will backtest all models in `saved_models/` and print a summary table.
 
 ### Backtest Parameters
-- Horizon: 50 ticks (~10-30 seconds)
-- Stop Loss: 5 pips
-- Take Profit: 10 pips (2:1 RR)
-- Opportunity threshold: 0.55
-- Direction thresholds: 0.52 (long) / 0.48 (short)
-- Combined confidence threshold: 0.30
+- Horizon: 200 ticks (~1-5 minutes)
+- Stop Loss: 10 pips
+- Take Profit: 20 pips (2:1 RR)
+- Opportunity threshold: 0.70
+- Direction thresholds: 0.55 (long) / 0.45 (short)
+- Combined confidence threshold: 0.35
 
-### Performance (EURUSD HFT)
-- Win Rate: 54.5%
-- Profit Factor: 1.33
-- Sharpe: 1.06 (trade-based annualization)
+### Performance (EURUSD)
+- Win Rate: 53.5%
+- Profit Factor: 1.68
+- Sharpe: 0.93
 
 ## Live Trading
 

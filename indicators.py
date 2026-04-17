@@ -133,13 +133,13 @@ def filter_data(df):
     return df.copy()
 
 
-def add_targets(df, horizon=50):
+def add_targets(df, horizon=200):
     """Predict: will price move profitably in next N ticks?"""
     print(f"Computing targets (horizon={horizon} ticks)...")
     
     df = df.copy()
     
-    # Future return after horizon ticks - regression target
+    # Future return after horizon ticks
     future_return = df['close'].shift(-horizon) / df['close'] - 1
     
     df['target_return'] = future_return
@@ -148,10 +148,12 @@ def add_targets(df, horizon=50):
     df['target_direction'] = (future_return > 0).astype(int)
     
     # Opportunity: significant move threshold
-    min_profit = df['tick_std'].rolling(50, min_periods=1).mean() * 0.25
+    min_profit = df['tick_std'].rolling(100, min_periods=1).mean() * 1.5
     df['target_opportunity'] = (future_return.abs() > min_profit).astype(int)
     
     df = df.dropna(subset=['target_opportunity', 'target_direction'])
+    
+    return df
     
     return df
     
