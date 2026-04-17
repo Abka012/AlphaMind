@@ -18,12 +18,12 @@ SYMBOLS = [
     "audjpy",
     "eurgbp",
 ]
-HORIZON = 1000  # ticks ahead (matches training)
+HORIZON = 50  # ticks ahead for HFT
 
-# Thresholds - aligned with main.py
-OPP_THRESHOLD = 0.50
-DIR_LONG_THRESHOLD = 0.52
-DIR_SHORT_THRESHOLD = 0.48
+# Thresholds - much more selective for HFT
+OPP_THRESHOLD = 0.65
+DIR_LONG_THRESHOLD = 0.58
+DIR_SHORT_THRESHOLD = 0.42
 COMBINED_CONF_THRESHOLD = 0.40
 
 
@@ -71,9 +71,9 @@ def run_backtest(symbol):
 
     print(f"Predictions complete: {len(opp_pred):,} samples")
 
-    # Backtest parameters - pip-based
+    # Backtest parameters - wider RR for mean reversion
     sl_pips = 10
-    tp_pips = 20
+    tp_pips = 30
     cost = 0.00005
 
     # Get pip value: 0.01 for JPY pairs, 0.0001 for others
@@ -94,18 +94,38 @@ def run_backtest(symbol):
     # Calculate combined confidence
     combined_conf = calculate_combined_confidence(opp_pred, dir_pred)
 
-    # Apply thresholds - aligned with main.py
+    # Session filtering - only trade during good sessions
+    hour = df["hour"].values
+    session_filter = (hour >= 8) & (hour <= 20)
+
+    # Spread filtering - only trade when spread is low (below median)
+    spread = df["tick_spread"].values
+    spread_median = np.median(spread[~np.isnan(spread)])
+    spread_filter = spread < spread_median
+
+    # Mean reversion strategy - trade extreme positions
+    price_position = df["tick_position"].values
+    position_long = price_position < 0.15  # oversold
+    position_short = price_position > 0.85  # overbought
+
+    # Apply thresholds - momentum + mean reversion
     trade_mask = opp_pred > OPP_THRESHOLD
     positions = np.zeros(len(dir_pred))
     positions[
         trade_mask
         & (dir_pred > DIR_LONG_THRESHOLD)
         & (combined_conf > COMBINED_CONF_THRESHOLD)
+        & session_filter
+        & spread_filter
+        & position_long
     ] = 1
     positions[
         trade_mask
         & (dir_pred < DIR_SHORT_THRESHOLD)
         & (combined_conf > COMBINED_CONF_THRESHOLD)
+        & session_filter
+        & spread_filter
+        & position_short
     ] = -1
 
     close_prices = df["close"].values
@@ -134,8 +154,10 @@ def run_backtest(symbol):
                 ret = tp_distance / entry_price
             elif len(sl_hit) > 0:
                 ret = -sl_distance / entry_price
-            else:
+            elif len(future_prices) > 0:
                 ret = (future_prices[-1] - entry_price) / entry_price
+            else:
+                ret = 0
         else:  # Short
             tp_hit = np.where(future_prices <= entry_price - tp_distance)[0]
             sl_hit = np.where(future_prices >= entry_price + sl_distance)[0]
@@ -144,8 +166,10 @@ def run_backtest(symbol):
                 ret = tp_distance / entry_price
             elif len(sl_hit) > 0:
                 ret = -sl_distance / entry_price
-            else:
+            elif len(future_prices) > 0:
                 ret = (entry_price - future_prices[-1]) / entry_price
+            else:
+                ret = 0
 
         returns.append(ret)
 

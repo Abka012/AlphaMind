@@ -8,7 +8,7 @@ from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
 SYMBOLS = ["eurusd", "gbpusd", "usdjpy", "audusd", "usdcad", "usdchf", "nzusd", "eurjpy", "gbpjpy", "audjpy", "eurgbp"]
-HORIZON = 1000  # ticks ahead to predict (~3-15 minutes)
+HORIZON = 50  # ticks ahead for HFT
 
 
 def print_target_stats(y1, y2):
@@ -44,8 +44,9 @@ def train_symbol(symbol):
     df = df.dropna(subset=["target_opportunity", "target_direction"])
     print(f"After dropna: {len(df):,}")
 
-    # Tick-based features
+    # Tick-based features + micro-structure for HFT
     features = [
+        # Core features
         "tick_ma_10",
         "tick_ma_50",
         "tick_ma_100",
@@ -71,6 +72,17 @@ def train_symbol(symbol):
         "ny_session",
         "asian_session",
         "overlap_session",
+        # Micro-structure features for HFT
+        "tick_direction_imbalance",
+        "spread_compression",
+        "tick_acceleration",
+        "vwap_deviation",
+        "volume_weighted_imbalance",
+        "consecutive_bid",
+        "consecutive_ask",
+        # Additional HFT features
+        "tick_spread",
+        "tick_position_normalized",
     ]
 
     print(f"\nUsing {len(features)} features")
@@ -125,13 +137,12 @@ def train_symbol(symbol):
     print(f"Opportunity Train Accuracy: {opp_train_acc:.3f}")
     print(f"Opportunity Test Accuracy: {opp_test_acc:.3f}")
 
-    # Train Direction model
+    # Train Direction model (as regression for better probability estimation)
     print("\n" + "=" * 50)
-    print("Training XGBoost for Direction...")
+    print("Training XGBoost for Direction (Regression)...")
     print("=" * 50)
 
-    pos_weight_dir = (len(y_dir_train) - y_dir_train.sum()) / (y_dir_train.sum() + 1)
-    model_dir = xgb.XGBClassifier(
+    model_dir = xgb.XGBRegressor(
         n_estimators=200,
         max_depth=6,
         learning_rate=0.03,
@@ -139,25 +150,27 @@ def train_symbol(symbol):
         gamma=1.0,
         reg_alpha=1.0,
         reg_lambda=3,
-        scale_pos_weight=pos_weight_dir,
-        objective="binary:logistic",
-        eval_metric="logloss",
+        objective="reg:squarederror",
         n_jobs=-1,
     )
 
+    y_dir_reg = df["target_return"].values[:split]
+    y_dir_reg_test = df["target_return"].values[split:]
+
     with tqdm(total=1, desc=f"{symbol.upper()} Direction", leave=False) as pbar:
         model_dir.fit(
-            X_train, y_dir_train, eval_set=[(X_test, y_dir_test)], verbose=False
+            X_train, y_dir_reg, eval_set=[(X_test, y_dir_reg_test)], verbose=False
         )
         pbar.update(1)
 
-    dir_train_pred = model_dir.predict_proba(X_train)[:, 1]
-    dir_train_acc = ((dir_train_pred > 0.5) == y_dir_train).mean()
-    dir_test_pred = model_dir.predict_proba(X_test)[:, 1]
-    dir_test_acc = ((dir_test_pred > 0.5) == y_dir_test).mean()
+    dir_train_pred = model_dir.predict(X_train)
+    dir_test_pred = model_dir.predict(X_test)
 
-    print(f"Direction Train Accuracy: {dir_train_acc:.3f}")
-    print(f"Direction Test Accuracy: {dir_test_acc:.3f}")
+    train_corr = np.corrcoef(dir_train_pred, y_dir_reg)[0, 1]
+    test_corr = np.corrcoef(dir_test_pred, y_dir_reg_test)[0, 1]
+
+    print(f"Direction Train Correlation: {train_corr:.3f}")
+    print(f"Direction Test Correlation: {test_corr:.3f}")
 
     print("\n--- Feature Importance (Direction) ---")
     importance = model_dir.feature_importances_

@@ -53,6 +53,7 @@ def add_features(df):
     df['tick_high_100'] = df['close'].rolling(window=100, min_periods=1).max()
     df['tick_low_100'] = df['close'].rolling(window=100, min_periods=1).min()
     df['tick_position'] = (df['close'] - df['tick_low_100']) / (df['tick_high_100'] - df['tick_low_100'] + 1e-9)
+    df['tick_position_normalized'] = (df['close'] - df['tick_ma_50']) / (df['tick_std'] + 1e-9)
     
     print("  - Volume features...")
     df['tick_volume_ma'] = df['tick_volume'].rolling(window=50, min_periods=1).mean()
@@ -90,6 +91,35 @@ def add_features(df):
     # Regime features
     df['tick_vol_regime'] = (df['tick_std'] > df['tick_std'].rolling(200, min_periods=1).mean()).astype(int)
     df['tick_trend_regime'] = (df['tick_trend'] > 0).astype(int)
+
+    # Micro-structure features for HFT
+    df['tick_direction'] = np.sign(df['close'].diff())
+    df['tick_direction'] = df['tick_direction'].replace(0, np.nan).ffill().fillna(0)
+    
+    df['tick_direction_imbalance'] = (
+        df['tick_direction'].rolling(window=20, min_periods=1).sum() / 20
+    )
+    
+    df['spread_ma'] = df['tick_spread'].rolling(window=20, min_periods=1).mean()
+    df['spread_compression'] = (df['tick_spread'] < df['spread_ma'] * 0.5).astype(int)
+    
+    df['tick_acceleration'] = df['close'].diff().diff()
+    
+    df['vwap'] = (df['close'] * df['tick_volume']).rolling(window=50, min_periods=1).sum() / (
+        df['tick_volume'].rolling(window=50, min_periods=1).sum() + 1e-9
+    )
+    df['vwap_deviation'] = (df['close'] - df['vwap']) / (df['tick_std'] + 1e-9)
+    
+    df['volume_weighted_imbalance'] = (
+        (df['bidVolume'] - df['askVolume']).rolling(window=20, min_periods=1).sum() / 20
+    )
+    
+    df['consecutive_bid'] = (
+        df['close'].diff().apply(lambda x: 1 if x > 0 else 0).rolling(window=5, min_periods=1).sum()
+    )
+    df['consecutive_ask'] = (
+        df['close'].diff().apply(lambda x: 1 if x < 0 else 0).rolling(window=5, min_periods=1).sum()
+    )
     
     # Clean up
     df = df.replace([np.inf, -np.inf], np.nan)
@@ -103,20 +133,22 @@ def filter_data(df):
     return df.copy()
 
 
-def add_targets(df, horizon=1000):
+def add_targets(df, horizon=50):
     """Predict: will price move profitably in next N ticks?"""
     print(f"Computing targets (horizon={horizon} ticks)...")
     
     df = df.copy()
     
-    # Future return after horizon ticks
+    # Future return after horizon ticks - regression target
     future_return = df['close'].shift(-horizon) / df['close'] - 1
+    
+    df['target_return'] = future_return
     
     # Direction: price goes up = 1, down = 0
     df['target_direction'] = (future_return > 0).astype(int)
     
-    # Opportunity: significant move based on tick_std
-    min_profit = df['tick_std'].rolling(100, min_periods=1).mean() * 0.5
+    # Opportunity: significant move threshold
+    min_profit = df['tick_std'].rolling(50, min_periods=1).mean() * 0.25
     df['target_opportunity'] = (future_return.abs() > min_profit).astype(int)
     
     df = df.dropna(subset=['target_opportunity', 'target_direction'])

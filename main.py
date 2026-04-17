@@ -130,14 +130,14 @@ def reconnect(max_retries=5):
     return False
 
 
-OPP_THRESHOLD = 0.50
-DIR_LONG_THRESHOLD = 0.52
-DIR_SHORT_THRESHOLD = 0.48
-COMBINED_CONF_THRESHOLD = 0.40
+OPP_THRESHOLD = 0.60
+DIR_LONG_THRESHOLD = 0.55
+DIR_SHORT_THRESHOLD = 0.45
+COMBINED_CONF_THRESHOLD = 0.35
 
 RISK_PER_TRADE = 0.02
-SL_PIPS = 10
-TP_PIPS = 20
+SL_PIPS = 5
+TP_PIPS = 10
 
 FIXED_LOT_SIZE = 100.0  # Fixed lot size for all trades
 
@@ -233,6 +233,15 @@ def calculate_max_lot_size(equity):
     lot = risk_amount / (SL_PIPS * 10)
     max_lot = min(lot, BASE_LOT_SIZE)
     return max(max_lot, 0.01)
+
+
+def calculate_confidence_lot(equity, initial, confidence):
+    base_lot = calculate_max_lot_size(equity)
+    dynamic_lot = calculate_dynamic_lot_size(equity, initial)
+    base = min(base_lot, dynamic_lot)
+    # Scale lot by confidence (0.3 to 1.0 multiplier)
+    conf_multiplier = max(min(confidence * 2, 1.0), 0.3)
+    return base * conf_multiplier
 
 
 def calculate_dynamic_lot_size(equity, initial):
@@ -505,6 +514,26 @@ def compute_live_features(symbol):
     features["ny_session"] = 1 if 13 <= features["hour"] < 21 else 0
     features["asian_session"] = 1 if 0 <= features["hour"] < 8 else 0
     features["overlap_session"] = 1 if 13 <= features["hour"] < 16 else 0
+
+    # Micro-structure features for HFT
+    tick_dir = np.sign(df["close"].diff())
+    tick_dir = tick_dir.replace(0, np.nan).ffill().fillna(0)
+    features["tick_direction_imbalance"] = tick_dir.rolling(window=20, min_periods=1).mean().iloc[-1]
+
+    spread_ma = df["tick_spread"].rolling(window=20, min_periods=1).mean().iloc[-1]
+    features["spread_compression"] = 1 if df["tick_spread"].iloc[-1] < spread_ma * 0.5 else 0
+
+    features["tick_acceleration"] = df["close"].diff().diff().iloc[-1]
+
+    vwap = (df["close"] * df["tick_volume"]).rolling(window=50, min_periods=1).sum() / (
+        df["tick_volume"].rolling(window=50, min_periods=1).sum() + 1e-9
+    )
+    features["vwap_deviation"] = (df["close"].iloc[-1] - vwap.iloc[-1]) / (features["tick_std"] + 1e-9)
+
+    features["volume_weighted_imbalance"] = 0
+
+    features["consecutive_bid"] = sum(1 for i in range(-5, 0) if df["close"].diff().iloc[i] > 0)
+    features["consecutive_ask"] = sum(1 for i in range(-5, 0) if df["close"].diff().iloc[i] < 0)
 
     return features
 
@@ -783,7 +812,7 @@ def main():
 
                 if not prices:
                     log(f"No prices received, will retry...")
-                    time.sleep(15)
+                    time.sleep(3)
                     continue
 
                 for ctrader_symbol, price_data in prices.items():
@@ -879,9 +908,7 @@ def main():
                             continue
 
                         equity = get_account_equity()
-                        max_lot_buffer = calculate_max_lot_size(equity)
-                        dynamic_lot = calculate_dynamic_lot_size(equity, initial_equity)
-                        lot = min(max_lot_buffer, dynamic_lot)
+                        lot = calculate_confidence_lot(equity, initial_equity, conf)
 
                         if signal_type == "LONG":
                             place_trade("BUY", symbol, lot, SL_PIPS, TP_PIPS)
@@ -892,12 +919,13 @@ def main():
                             f"  {symbol.upper()}: {signal_type} | Conf: {conf:.3f} | Lot: {lot:.2f}"
                         )
 
-                time.sleep(15)
+                else:
+                    time.sleep(3)
 
             except Exception as e:
                 tb = traceback.extract_tb(sys.exc_info()[2])[-1]
                 log(f"Error: {e} | File: {tb.filename} | Line: {tb.lineno}")
-                time.sleep(15)
+                time.sleep(3)
 
     except KeyboardInterrupt:
         log("Bot stopped by user")
