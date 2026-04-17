@@ -142,6 +142,25 @@ def train_symbol(symbol):
     print("Training XGBoost for Direction (Regression)...")
     print("=" * 50)
 
+    # Use clean data - filter out NaN from target_return
+    df_clean = df.dropna(subset=['target_return'])
+    y_dir_reg = df_clean["target_return"].values
+    X_for_reg = scaler.transform(df_clean[features])
+    
+    X_train_reg = X_for_reg[:split]
+    X_test_reg = X_for_reg[split:]
+    y_dir_reg = y_dir_reg[:split]
+    y_dir_reg_test = y_dir_reg[split:]
+    
+    # Remove any remaining NaN or infinite
+    valid_train = np.isfinite(y_dir_reg)
+    valid_test = np.isfinite(y_dir_reg_test)
+    
+    X_train_reg = X_train_reg[valid_train]
+    y_dir_reg = y_dir_reg[valid_train]
+    X_test_reg = X_test_reg[valid_test]
+    y_dir_reg_test = y_dir_reg_test[valid_test]
+
     model_dir = xgb.XGBRegressor(
         n_estimators=200,
         max_depth=6,
@@ -154,17 +173,14 @@ def train_symbol(symbol):
         n_jobs=-1,
     )
 
-    y_dir_reg = df["target_return"].values[:split]
-    y_dir_reg_test = df["target_return"].values[split:]
-
     with tqdm(total=1, desc=f"{symbol.upper()} Direction", leave=False) as pbar:
         model_dir.fit(
-            X_train, y_dir_reg, eval_set=[(X_test, y_dir_reg_test)], verbose=False
+            X_train_reg, y_dir_reg, eval_set=[(X_test_reg, y_dir_reg_test)], verbose=False
         )
         pbar.update(1)
 
-    dir_train_pred = model_dir.predict(X_train)
-    dir_test_pred = model_dir.predict(X_test)
+    dir_train_pred = model_dir.predict(X_train_reg)
+    dir_test_pred = model_dir.predict(X_test_reg)
 
     train_corr = np.corrcoef(dir_train_pred, y_dir_reg)[0, 1]
     test_corr = np.corrcoef(dir_test_pred, y_dir_reg_test)[0, 1]
@@ -198,7 +214,7 @@ def train_symbol(symbol):
     return {
         "symbol": symbol,
         "opp_test_acc": opp_test_acc,
-        "dir_test_acc": dir_test_acc,
+        "dir_test_corr": test_corr if 'test_corr' in dir() else 0,
     }
 
 
@@ -227,8 +243,9 @@ if __name__ == "__main__":
     print("TRAINING SUMMARY")
     print("=" * 50)
     for r in results:
+        corr = r.get('dir_test_corr', 0)
         print(
-            f"  {r['symbol'].upper()}: Opp={r['opp_test_acc']:.3f}, Dir={r['dir_test_acc']:.3f}"
+            f"  {r['symbol'].upper()}: Opp={r['opp_test_acc']:.3f}, Dir_corr={corr:.3f}"
         )
     print("=" * 50)
     print(f"✅ All models trained and saved to saved_models/")

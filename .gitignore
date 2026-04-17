@@ -29,3 +29,6 @@ saved_models/*.pth
 
 # Json log
 saved_models/*.json
+
+# Agent config
+AGENTS.md
