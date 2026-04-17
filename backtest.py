@@ -20,11 +20,11 @@ SYMBOLS = [
 ]
 HORIZON = 50  # ticks ahead for HFT
 
-# Thresholds - much more selective for HFT
-OPP_THRESHOLD = 0.65
-DIR_LONG_THRESHOLD = 0.58
-DIR_SHORT_THRESHOLD = 0.42
-COMBINED_CONF_THRESHOLD = 0.40
+# Thresholds - balanced for more trades
+OPP_THRESHOLD = 0.55
+DIR_LONG_THRESHOLD = 0.52
+DIR_SHORT_THRESHOLD = 0.48
+COMBINED_CONF_THRESHOLD = 0.30
 
 
 def calculate_combined_confidence(opp_pred, dir_pred):
@@ -94,38 +94,18 @@ def run_backtest(symbol):
     # Calculate combined confidence
     combined_conf = calculate_combined_confidence(opp_pred, dir_pred)
 
-    # Session filtering - only trade during good sessions
-    hour = df["hour"].values
-    session_filter = (hour >= 8) & (hour <= 20)
-
-    # Spread filtering - only trade when spread is low (below median)
-    spread = df["tick_spread"].values
-    spread_median = np.median(spread[~np.isnan(spread)])
-    spread_filter = spread < spread_median
-
-    # Mean reversion strategy - trade extreme positions
-    price_position = df["tick_position"].values
-    position_long = price_position < 0.15  # oversold
-    position_short = price_position > 0.85  # overbought
-
-    # Apply thresholds - momentum + mean reversion
+    # Apply thresholds - momentum only
     trade_mask = opp_pred > OPP_THRESHOLD
     positions = np.zeros(len(dir_pred))
     positions[
         trade_mask
         & (dir_pred > DIR_LONG_THRESHOLD)
         & (combined_conf > COMBINED_CONF_THRESHOLD)
-        & session_filter
-        & spread_filter
-        & position_long
     ] = 1
     positions[
         trade_mask
         & (dir_pred < DIR_SHORT_THRESHOLD)
         & (combined_conf > COMBINED_CONF_THRESHOLD)
-        & session_filter
-        & spread_filter
-        & position_short
     ] = -1
 
     close_prices = df["close"].values

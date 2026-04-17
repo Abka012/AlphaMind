@@ -44,6 +44,11 @@ def train_symbol(symbol):
     df = df.dropna(subset=["target_opportunity", "target_direction"])
     print(f"After dropna: {len(df):,}")
 
+    # Sample for faster training
+    if len(df) > MAX_SAMPLES:
+        df = df.iloc[-MAX_SAMPLES:]
+        print(f"Sampled to: {len(df):,}")
+
     # Tick-based features + micro-structure for HFT
     features = [
         # Core features
@@ -137,31 +142,13 @@ def train_symbol(symbol):
     print(f"Opportunity Train Accuracy: {opp_train_acc:.3f}")
     print(f"Opportunity Test Accuracy: {opp_test_acc:.3f}")
 
-    # Train Direction model (as regression for better probability estimation)
+    # Train Direction model (classification for better signal)
     print("\n" + "=" * 50)
-    print("Training XGBoost for Direction (Regression)...")
+    print("Training XGBoost for Direction...")
     print("=" * 50)
 
-    # Use clean data - filter out NaN from target_return
-    df_clean = df.dropna(subset=['target_return'])
-    y_dir_reg = df_clean["target_return"].values
-    X_for_reg = scaler.transform(df_clean[features])
-    
-    X_train_reg = X_for_reg[:split]
-    X_test_reg = X_for_reg[split:]
-    y_dir_reg = y_dir_reg[:split]
-    y_dir_reg_test = y_dir_reg[split:]
-    
-    # Remove any remaining NaN or infinite
-    valid_train = np.isfinite(y_dir_reg)
-    valid_test = np.isfinite(y_dir_reg_test)
-    
-    X_train_reg = X_train_reg[valid_train]
-    y_dir_reg = y_dir_reg[valid_train]
-    X_test_reg = X_test_reg[valid_test]
-    y_dir_reg_test = y_dir_reg_test[valid_test]
-
-    model_dir = xgb.XGBRegressor(
+    pos_weight_dir = (len(y_dir_train) - y_dir_train.sum()) / (y_dir_train.sum() + 1)
+    model_dir = xgb.XGBClassifier(
         n_estimators=200,
         max_depth=6,
         learning_rate=0.03,
@@ -169,24 +156,26 @@ def train_symbol(symbol):
         gamma=1.0,
         reg_alpha=1.0,
         reg_lambda=3,
-        objective="reg:squarederror",
+        scale_pos_weight=pos_weight_dir,
+        objective="binary:logistic",
+        eval_metric="logloss",
         n_jobs=-1,
     )
 
     with tqdm(total=1, desc=f"{symbol.upper()} Direction", leave=False) as pbar:
         model_dir.fit(
-            X_train_reg, y_dir_reg, eval_set=[(X_test_reg, y_dir_reg_test)], verbose=False
+            X_train, y_dir_train, eval_set=[(X_test, y_dir_test)], verbose=False
         )
         pbar.update(1)
 
-    dir_train_pred = model_dir.predict(X_train_reg)
-    dir_test_pred = model_dir.predict(X_test_reg)
+    dir_train_pred = model_dir.predict_proba(X_train)[:, 1]
+    dir_test_pred = model_dir.predict_proba(X_test)[:, 1]
 
-    train_corr = np.corrcoef(dir_train_pred, y_dir_reg)[0, 1]
-    test_corr = np.corrcoef(dir_test_pred, y_dir_reg_test)[0, 1]
+    dir_train_acc = ((dir_train_pred > 0.5) == y_dir_train).mean()
+    dir_test_acc = ((dir_test_pred > 0.5) == y_dir_test).mean()
 
-    print(f"Direction Train Correlation: {train_corr:.3f}")
-    print(f"Direction Test Correlation: {test_corr:.3f}")
+    print(f"Direction Train Accuracy: {dir_train_acc:.3f}")
+    print(f"Direction Test Accuracy: {dir_test_acc:.3f}")
 
     print("\n--- Feature Importance (Direction) ---")
     importance = model_dir.feature_importances_
@@ -214,14 +203,18 @@ def train_symbol(symbol):
     return {
         "symbol": symbol,
         "opp_test_acc": opp_test_acc,
-        "dir_test_corr": test_corr if 'test_corr' in dir() else 0,
+        "dir_test_acc": dir_test_acc,
     }
+
+
+MAX_SAMPLES = 500000  # Limit samples for faster training
 
 
 if __name__ == "__main__":
     print(f"\n{'#' * 50}")
     print(f"# Training models for {len(SYMBOLS)} currency pairs")
     print(f"# Horizon: {HORIZON} ticks")
+    print(f"# Max samples per symbol: {MAX_SAMPLES:,}")
     print(f"{'#' * 50}")
 
     results = []
@@ -243,9 +236,8 @@ if __name__ == "__main__":
     print("TRAINING SUMMARY")
     print("=" * 50)
     for r in results:
-        corr = r.get('dir_test_corr', 0)
         print(
-            f"  {r['symbol'].upper()}: Opp={r['opp_test_acc']:.3f}, Dir_corr={corr:.3f}"
+            f"  {r['symbol'].upper()}: Opp={r['opp_test_acc']:.3f}, Dir={r['dir_test_acc']:.3f}"
         )
     print("=" * 50)
     print(f"✅ All models trained and saved to saved_models/")
