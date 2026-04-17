@@ -116,7 +116,7 @@ def run_backtest(symbol):
 
     if len(valid_indices) == 0:
         print("No trades to analyze!")
-        return {"symbol": symbol, "trades": 0, "win_rate": 0, "profit_factor": 0}
+        return {"symbol": symbol, "trades": 0, "win_rate": 0, "profit_factor": 0, "sharpe": 0, "max_drawdown": 0, "total_return": 0}
 
     returns = []
 
