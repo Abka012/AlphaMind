@@ -139,7 +139,7 @@ def add_targets(df, horizon=200):
     
     df = df.copy()
     
-    # Future return after horizon ticks
+    # Future return after horizon ticks (percentage-based for consistency across pairs)
     future_return = df['close'].shift(-horizon) / df['close'] - 1
     
     df['target_return'] = future_return
@@ -147,13 +147,12 @@ def add_targets(df, horizon=200):
     # Direction: price goes up = 1, down = 0
     df['target_direction'] = (future_return > 0).astype(int)
     
-    # Opportunity: significant move threshold
-    min_profit = df['tick_std'].rolling(100, min_periods=1).mean() * 1.5
-    df['target_opportunity'] = (future_return.abs() > min_profit).astype(int)
+    # Opportunity: significant move threshold (percentage-based)
+    # Use 0.02% as threshold - ~20 pips for EURUSD at 50 ticks, scales with horizon
+    min_profit_pct = 0.0002
+    df['target_opportunity'] = (future_return.abs() > min_profit_pct).astype(int)
     
     df = df.dropna(subset=['target_opportunity', 'target_direction'])
-    
-    return df
     
     return df
     
