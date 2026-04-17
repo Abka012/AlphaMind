@@ -97,6 +97,10 @@ def train_symbol(symbol):
         # Additional HFT features
         "tick_spread",
         "tick_position_normalized",
+        # New Order Flow features
+        "cum_delta",
+        "cum_delta_deviation",
+        "trade_intensity",
     ]
 
     print(f"\nUsing {len(features)} features")
@@ -213,12 +217,11 @@ if __name__ == "__main__":
     print(f"{'#' * 50}")
 
     results = []
-    # User requested to focus on EURUSD first
-    target_symbols = ["eurusd"]
+    # All symbols from the SYMBOLS list
+    target_symbols = SYMBOLS
 
     for idx, symbol in enumerate(target_symbols):
         print(f"\n[{(idx + 1)}/{len(target_symbols)}] Processing {symbol.upper()}...")
-
         if not os.path.exists(f"data/raw_ticks/{symbol}.csv"):
             print(f"  ⚠ Data file not found: data/raw_ticks/{symbol}.csv")
             print(f"  Run: python data/download_raw_ticks.py")

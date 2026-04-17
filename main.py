@@ -45,23 +45,37 @@ TICK_HISTORY = 50
 def get_active_symbols(performance_file="saved_models/performance.json", top_n=6):
     """
     Load top performing symbols from backtest results.
-    Sorts by profit_factor and returns top N symbols.
-    Falls back to all symbols if file not found.
+    Filter for profitable pairs only (PF > 1.1) and return top N.
     """
     try:
         with open(performance_file, "r") as f:
             results = json.load(f)
 
+        # Filter for quality: PF > 1.1 and significant trade count
+        quality_symbols = {
+            s: data
+            for s, data in results.items()
+            if data.get("profit_factor", 0) > 1.1 and data.get("trades", 0) > 100
+        }
+
         sorted_symbols = sorted(
-            results.items(), key=lambda x: x[1].get("profit_factor", 0), reverse=True
+            quality_symbols.items(),
+            key=lambda x: x[1].get("profit_factor", 0),
+            reverse=True,
         )
 
         top_dict = {}
         for symbol, _ in sorted_symbols[:top_n]:
             top_dict[symbol] = SYMBOL_MAP.get(symbol, symbol.upper())
 
+        if not top_dict:
+            log("No high-quality symbols found in performance.json, using defaults.")
+            return SYMBOL_MAP
+
+        log(f"Active Symbols (PF > 1.1): {', '.join(top_dict.keys())}")
         return top_dict
     except Exception as e:
+        log(f"Error loading performance.json: {e}")
         return SYMBOL_MAP
 
 
@@ -544,6 +558,32 @@ def compute_live_features(symbol):
         1 for i in range(-5, 0) if df["close"].diff().iloc[i] < 0
     )
 
+    # Order Flow features
+    df["tick_delta"] = (
+        df["bidPrice"] - df["askPrice"]
+    )  # Simplified for live if volume not available per tick
+    # Check if volume is available
+    if "bidVolume" in df.columns and "askVolume" in df.columns:
+        df["tick_delta"] = df["bidVolume"] - df["askVolume"]
+
+    features["cum_delta"] = (
+        df["tick_delta"].rolling(window=100, min_periods=1).sum().iloc[-1]
+    )
+    cum_delta_ma = (
+        df["tick_delta"]
+        .rolling(window=100, min_periods=1)
+        .sum()
+        .rolling(window=200, min_periods=1)
+        .mean()
+        .iloc[-1]
+    )
+    features["cum_delta_deviation"] = features["cum_delta"] - cum_delta_ma
+
+    time_diff = df["timestamp"].diff().dt.total_seconds()
+    features["trade_intensity"] = 1.0 / (
+        time_diff.rolling(window=20).mean().iloc[-1] + 1e-9
+    )
+
     return features
 
 
@@ -872,12 +912,17 @@ def main():
 
                     combined_conf = calculate_combined_confidence(avg_opp, avg_dir)
 
+                    # Symbol-specific thresholds (matching backtest.py)
+                    is_jpy = any(x in symbol.lower() for x in ["jpy"])
+                    opp_thresh = 0.85 if is_jpy else 0.70
+                    conf_thresh = 0.60 if is_jpy else 0.40
+
                     # Higher thresholds for live trading (from backtest refinement)
                     meets_thresh = "NO"
                     if (
                         (all_long or all_short)
-                        and avg_opp > 0.70
-                        and combined_conf > 0.40
+                        and avg_opp > opp_thresh
+                        and combined_conf > conf_thresh
                         and vol_regime == 1
                     ):
                         meets_thresh = "YES"

@@ -139,6 +139,18 @@ def add_features(df):
         .sum()
     )
 
+    print("  - Order Flow features...")
+    # Cumulative Delta (Buy Volume - Sell Volume)
+    df["tick_delta"] = df["bidVolume"] - df["askVolume"]
+    df["cum_delta"] = df["tick_delta"].rolling(window=100, min_periods=1).sum()
+    df["cum_delta_ma"] = df["cum_delta"].rolling(window=200, min_periods=1).mean()
+    df["cum_delta_deviation"] = df["cum_delta"] - df["cum_delta_ma"]
+
+    # Trade Intensity (Ticks per window)
+    # Since we are in tick-by-tick data, we can use the time difference
+    df["time_diff"] = df.index.to_series().diff().dt.total_seconds()
+    df["trade_intensity"] = 1.0 / (df["time_diff"].rolling(window=20).mean() + 1e-9)
+
     # Clean up
     df = df.replace([np.inf, -np.inf], np.nan)
     df = df.ffill().bfill()

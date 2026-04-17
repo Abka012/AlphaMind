@@ -96,6 +96,12 @@ def run_backtest(symbol):
     avg_opp /= len(horizons)
     avg_dir /= len(horizons)
 
+    # Dynamic threshold based on symbol characteristics
+    # JPY pairs often have more "noise" opportunities
+    is_jpy = any(x in symbol.lower() for x in ["jpy"])
+
+    opp_thresh = 0.85 if is_jpy else 0.70
+    conf_thresh = 0.60 if is_jpy else 0.40
     # Backtest parameters
     sl_pips = 10
     tp_pips = 30
@@ -119,25 +125,22 @@ def run_backtest(symbol):
     combined_conf = np.where(avg_dir > 0.5, avg_opp * avg_dir, avg_opp * (1 - avg_dir))
 
     # Regime Filter: Volatility > average
-    # tick_vol_regime: 1 if tick_std > tick_std_ma_200
-    # Let's get it from the dataframe if available or compute it here
     vol_regime = df["tick_vol_regime"].values
 
     positions = np.zeros(len(avg_dir))
 
     # Selective thresholds for consensus + Volatility Regime filter
-    # Increasing thresholds for higher quality
     positions[
         dir_consensus_long
-        & (avg_opp > 0.70)
-        & (combined_conf > 0.40)
-        & (vol_regime == 1)  # Only trade in high volatility
+        & (avg_opp > opp_thresh)
+        & (combined_conf > conf_thresh)
+        & (vol_regime == 1)
     ] = 1
 
     positions[
         dir_consensus_short
-        & (avg_opp > 0.70)
-        & (combined_conf > 0.40)
+        & (avg_opp > opp_thresh)
+        & (combined_conf > conf_thresh)
         & (vol_regime == 1)
     ] = -1
 
@@ -166,34 +169,73 @@ def run_backtest(symbol):
         entry_price = close_prices[idx]
         sl_distance = sl_pips * pip_value
         tp_distance = tp_pips * pip_value
+
+        # Trailing stop parameters
+        be_threshold = 5 * pip_value  # Move to breakeven after 5 pips profit
+        trail_start = 10 * pip_value  # Start trailing after 10 pips profit
+        trail_dist = 5 * pip_value  # Trail distance
+
+        current_sl = (
+            entry_price - sl_distance
+            if positions[idx] == 1
+            else entry_price + sl_distance
+        )
+        peak_profit = 0
+
         future_prices = close_prices[idx + 1 : idx + trained_horizon + 1]
+        trade_ret = 0
 
-        if positions[idx] == 1:  # Long
-            tp_hit = np.where(future_prices >= entry_price + tp_distance)[0]
-            sl_hit = np.where(future_prices <= entry_price - sl_distance)[0]
+        for i, price in enumerate(future_prices):
+            if positions[idx] == 1:  # Long
+                profit = price - entry_price
 
-            if len(tp_hit) > 0 and (len(sl_hit) == 0 or tp_hit[0] < sl_hit[0]):
-                ret = tp_distance / entry_price
-            elif len(sl_hit) > 0:
-                ret = -sl_distance / entry_price
-            elif len(future_prices) > 0:
-                ret = (future_prices[-1] - entry_price) / entry_price
-            else:
-                ret = 0
-        else:  # Short
-            tp_hit = np.where(future_prices <= entry_price - tp_distance)[0]
-            sl_hit = np.where(future_prices >= entry_price + sl_distance)[0]
+                # Move to breakeven
+                if profit >= be_threshold and current_sl < entry_price:
+                    current_sl = entry_price
 
-            if len(tp_hit) > 0 and (len(sl_hit) == 0 or tp_hit[0] < sl_hit[0]):
-                ret = tp_distance / entry_price
-            elif len(sl_hit) > 0:
-                ret = -sl_distance / entry_price
-            elif len(future_prices) > 0:
-                ret = (entry_price - future_prices[-1]) / entry_price
-            else:
-                ret = 0
+                # Trail stop
+                if profit >= trail_start:
+                    new_sl = price - trail_dist
+                    if new_sl > current_sl:
+                        current_sl = new_sl
 
-        returns.append(ret)
+                # Check exit
+                if price >= entry_price + tp_distance:
+                    trade_ret = tp_distance / entry_price
+                    break
+                elif price <= current_sl:
+                    trade_ret = (current_sl - entry_price) / entry_price
+                    break
+            else:  # Short
+                profit = entry_price - price
+
+                # Move to breakeven
+                if profit >= be_threshold and current_sl > entry_price:
+                    current_sl = entry_price
+
+                # Trail stop
+                if profit >= trail_start:
+                    new_sl = price + trail_dist
+                    if new_sl < current_sl:
+                        current_sl = new_sl
+
+                # Check exit
+                if price <= entry_price - tp_distance:
+                    trade_ret = tp_distance / entry_price
+                    break
+                elif price >= current_sl:
+                    trade_ret = (entry_price - current_sl) / entry_price
+                    break
+
+            # Horizon exit
+            if i == len(future_prices) - 1:
+                trade_ret = (
+                    (price - entry_price) / entry_price
+                    if positions[idx] == 1
+                    else (entry_price - price) / entry_price
+                )
+
+        returns.append(trade_ret)
 
     returns = np.array(returns) - cost
     wins = returns[returns > 0]
