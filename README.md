@@ -158,6 +158,11 @@ This will backtest all models in `saved_models/` and print a summary table.
 - Direction thresholds: 0.52 (long) / 0.48 (short)
 - Combined confidence threshold: 0.30
 
+### Performance (EURUSD HFT)
+- Win Rate: 54.5%
+- Profit Factor: 1.33
+- Sharpe: 69.8
+
 ## Live Trading
 
 Run the trading bot:
