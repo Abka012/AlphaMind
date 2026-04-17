@@ -161,7 +161,7 @@ This will backtest all models in `saved_models/` and print a summary table.
 ### Performance (EURUSD HFT)
 - Win Rate: 54.5%
 - Profit Factor: 1.33
-- Sharpe: 69.8
+- Sharpe: 1.06 (trade-based annualization)
 
 ## Live Trading
 

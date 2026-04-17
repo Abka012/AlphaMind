@@ -162,7 +162,10 @@ def run_backtest(symbol):
     profit_factor = total_wins / total_losses
 
     equity = np.cumprod(1 + returns)
-    sharpe = np.mean(returns) / (np.std(returns) + 1e-9) * np.sqrt(252 * 24 * 60 * 60)
+    # Annualize: using sqrt of number of trades for more realistic Sharpe
+    # Each trade represents ~50 ticks (horizon), not 1 second
+    n_periods_per_day = len(returns) / (HORIZON * 60)  # rough estimate
+    sharpe = np.mean(returns) / (np.std(returns) + 1e-9) * np.sqrt(n_periods_per_day * 252) if n_periods_per_day > 0 else 0
     win_rate = len(wins) / len(returns) if len(returns) > 0 else 0
     max_drawdown = 1 - (equity / np.maximum.accumulate(equity)).min()
 
