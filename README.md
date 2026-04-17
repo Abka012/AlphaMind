@@ -1,12 +1,48 @@
 # AlphaMind
 
-Medium-frequency trading bot using XGBoost and raw tick data with cTrader FIX API.
+High-frequency trading (HFT) bot using XGBoost and raw tick data with cTrader FIX API.
 
 ## Overview
 
 This trading bot uses machine learning (XGBoost) to predict price direction on multiple forex pairs using raw tick data from Dukascopy. One model is trained per trading pair.
 
 Trading is executed via **cTrader FIX API** for low-latency execution.
+
+## HFT Optimizations (2024)
+
+The model has been optimized for high-frequency trading with the following improvements:
+
+| Parameter | Original | HFT |
+|-----------|----------|-----|
+| Horizon | 1000 ticks | 50 ticks (~10-30 sec) |
+| SL/TP | 10/20 pips | 5/10 pips |
+| Check Interval | 15 sec | 3 sec |
+| Features | 25 | 34 (+micro-structure) |
+
+### New HFT Features
+- **Tick Direction Imbalance**: Tracks consecutive bid/ask pressure
+- **Spread Compression**: Identifies low-spread opportunities
+- **VWAP Deviation**: Measures fair value deviation
+- **Volume-Weighted Imbalance**: Order flow analysis
+- **Acceleration**: Second-order momentum
+
+## Development with AGENTS.md
+
+This project uses `AGENTS.md` for agentic development workflow:
+
+```bash
+# Agent sessions are documented in docs/agent-sessions/
+# Each session tracks: goal, files changed, commands run
+opencode export  # Export current session
+```
+
+**Benefits:**
+- Traces all code changes with clear commit messages
+- Documents decision rationale and实验 results
+- Enables reproducibility of optimization experiments
+- Branch-based workflow: `agent/<task-name>` for each feature
+
+See `AGENTS.md` for full workflow rules.
 
 ## Requirements
 
@@ -115,11 +151,12 @@ python backtest.py
 This will backtest all models in `saved_models/` and print a summary table.
 
 ### Backtest Parameters
-- Horizon: 1000 ticks (~3-15 minutes)
-- Stop Loss: 10 pips
-- Take Profit: 20 pips (2:1 RR)
-- Opportunity threshold: 0.70
-- Direction thresholds: 0.55 (long) / 0.45 (short)
+- Horizon: 50 ticks (~10-30 seconds)
+- Stop Loss: 5 pips
+- Take Profit: 10 pips (2:1 RR)
+- Opportunity threshold: 0.55
+- Direction thresholds: 0.52 (long) / 0.48 (short)
+- Combined confidence threshold: 0.30
 
 ## Live Trading
 
@@ -142,16 +179,16 @@ The bot will:
 
 ### Trading Parameters (in main.py)
 ```python
-# Thresholds for trade signals
-OPP_THRESHOLD = 0.50           # Minimum opportunity probability (0.50-0.70)
-DIR_LONG_THRESHOLD = 0.52      # Direction threshold for LONG (0.52-0.55)
-DIR_SHORT_THRESHOLD = 0.48    # Direction threshold for SHORT (0.45-0.48)
-COMBINED_CONF_THRESHOLD = 0.40 # Minimum combined confidence (0.25-0.40)
+# Thresholds for trade signals (HFT optimized)
+OPP_THRESHOLD = 0.55           # Minimum opportunity probability
+DIR_LONG_THRESHOLD = 0.52      # Direction threshold for LONG
+DIR_SHORT_THRESHOLD = 0.48    # Direction threshold for SHORT
+COMBINED_CONF_THRESHOLD = 0.30 # Minimum combined confidence
 
 # Risk Management
 RISK_PER_TRADE = 0.02          # 2% risk per trade (used for dynamic lot sizing)
-SL_PIPS = 10                   # Stop loss in pips
-TP_PIPS = 20                   # Take profit in pips (2:1 reward:risk)
+SL_PIPS = 5                    # Stop loss in pips (HFT tight)
+TP_PIPS = 10                   # Take profit in pips (2:1 reward:risk)
 
 # Lot Sizing
 FIXED_LOT_SIZE = 100.0          # Fixed lot for all trades
@@ -237,17 +274,27 @@ The bot now supports **dynamic symbol selection** based on backtest performance:
 
 This allows the bot to focus on historically best-performing pairs while maintaining diversity.
 
-## Model Features (25 features)
+## Model Features (34 features)
 
+### Core Features (25)
 - Price: tick_ma_10, tick_ma_50, tick_ma_100, tick_ma_200
 - Volatility: tick_std, tick_std_50
 - Momentum: tick_momentum_10, tick_momentum_50, tick_momentum_100
 - Trend: tick_trend, tick_trend_50, tick_trend_normalized
 - Volume: tick_volume_ratio, tick_volume_spike
-- Spread: tick_spread_pct
+- Spread: tick_spread, tick_spread_pct
 - Indicators: tick_rsi_centered, tick_atr
 - Regime: tick_vol_regime, tick_trend_regime
 - Time: hour, london_session, ny_session, asian_session, overlap_session
+
+### HFT Micro-Structure Features (9)
+- tick_direction_imbalance - Consecutive bid/ask pressure
+- spread_compression - Low spread condition detection
+- tick_acceleration - Second-order momentum
+- vwap_deviation - Fair value deviation
+- volume_weighted_imbalance - Order flow analysis
+- consecutive_bid/ask - Mini-trend detection
+- tick_position_normalized - Normalized price position
 
 ## Data Source
 
