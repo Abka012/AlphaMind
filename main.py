@@ -42,6 +42,44 @@ SYMBOL_MAP = {
 TICK_HISTORY = 50
 
 
+def load_recent_history(symbol, n_ticks=200):
+    """
+    Load recent tick history from CSV to warm up features with stable MA/std calculations.
+    Returns a list of tick dicts to prepend to the tick buffer.
+    """
+    csv_path = f"data/raw_ticks/{symbol}.csv"
+    if not os.path.exists(csv_path):
+        return None
+
+    try:
+        # Read last n_ticks rows from CSV using tail
+        df = pd.read_csv(csv_path)
+        if len(df) <= n_ticks:
+            # If file has fewer than n_ticks, use all rows
+            pass
+        else:
+            df = df.tail(n_ticks)
+        if len(df) == 0:
+            return None
+
+        # Convert to list of tick dicts
+        ticks = []
+        for _, row in df.iterrows():
+            ticks.append(
+                {
+                    "timestamp": pd.Timestamp.now(),  # Use current time for compatibility
+                    "close": (row["bidPrice"] + row["askPrice"]) / 2,
+                    "bidPrice": row["bidPrice"],
+                    "askPrice": row["askPrice"],
+                    "tick_volume": 1,
+                }
+            )
+        return ticks
+    except Exception as e:
+        log(f"Warning: Could not load history for {symbol}: {e}")
+        return None
+
+
 def get_active_symbols(performance_file="saved_models/performance.json", top_n=6):
     """
     Load top performing symbols from backtest results.
@@ -763,6 +801,16 @@ def main():
     log(
         f"Thresholds - Opp: {OPP_THRESHOLD}, Dir: {DIR_LONG_THRESHOLD}/{DIR_SHORT_THRESHOLD}, Combined: {COMBINED_CONF_THRESHOLD}"
     )
+
+    # Warm up tick buffers with recent history for better feature calculation
+    log("Warming up tick buffers with recent history...")
+    for symbol in ACTIVE_SYMBOLS.keys():
+        history = load_recent_history(symbol, n_ticks=200)
+        if history:
+            tick_buffers[symbol].extend(history)
+            log(f"  {symbol.upper()}: loaded {len(history)} ticks from history")
+        else:
+            log(f"  {symbol.upper()}: no history loaded (will use live ticks)")
 
     log("Bot started! Waiting for signals...")
     log("Fetching live prices...")
