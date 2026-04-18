@@ -100,8 +100,8 @@ def run_backtest(symbol):
     # JPY pairs often have more "noise" opportunities
     is_jpy = any(x in symbol.lower() for x in ["jpy"])
 
-    opp_thresh = 0.85 if is_jpy else 0.70
-    conf_thresh = 0.60 if is_jpy else 0.40
+    opp_thresh = 0.85 if is_jpy else 0.80
+    conf_thresh = 0.60 if is_jpy else 0.55
     # Backtest parameters
     sl_pips = 10
     tp_pips = 30
