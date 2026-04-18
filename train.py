@@ -206,7 +206,7 @@ def train_symbol(symbol):
     return {"symbol": symbol, "summary": summary}
 
 
-MAX_SAMPLES = 500000  # Limit samples for faster training
+MAX_SAMPLES = 1000000  # Limit samples for faster training
 
 
 if __name__ == "__main__":

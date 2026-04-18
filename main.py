@@ -39,7 +39,7 @@ SYMBOL_MAP = {
     "eurgbp": "EURGBP",
 }
 
-TICK_HISTORY = 50
+TICK_HISTORY = 300
 
 
 def load_recent_history(symbol, n_ticks=200):
