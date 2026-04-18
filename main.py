@@ -91,9 +91,7 @@ def get_active_symbols(performance_file="saved_models/performance.json", top_n=6
 
         # Filter for quality: PF > 1.1 and significant trade count
         quality_symbols = {
-            s: data
-            for s, data in results.items()
-            if data.get("profit_factor", 0) > 1.1 and data.get("trades", 0) > 100
+            s: data for s, data in results.items() if data.get("profit_factor", 0) > 1.1
         }
 
         sorted_symbols = sorted(
